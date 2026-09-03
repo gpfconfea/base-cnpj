@@ -178,7 +178,7 @@ def health():
 def cargas():
     with pool.connection() as conn:
         linhas = conn.execute(
-            "SELECT id, slot, status, iniciada_em, concluida_em, arquivos, total_registros, erro "
+            "SELECT id, status, iniciada_em, concluida_em, arquivos, total_registros, erro "
             "FROM carga ORDER BY id DESC LIMIT 10"
         ).fetchall()
     return {"cargas": linhas}

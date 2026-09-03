@@ -31,7 +31,7 @@ curl http://localhost:8006/health
 ## Carregar e atualizar a base
 
 ```bash
-./scripts/atualizar.sh
+./scripts/atualizar.sh --limpar
 ```
 
 O script faz duas etapas, que também podem ser rodadas separadamente:
@@ -46,21 +46,9 @@ docker compose --profile manual run --rm ingestor -m app.ingerir
 
 `app.ingerir` lê os arquivos em paralelo e joga tudo no Postgres via `COPY`. Aceita `--workers`,
 `--limite-arquivos` (útil para um teste com 2 ou 3 arquivos antes de encarar a base toda) e
-`--descartar-anterior`.
+`--apagar` (para remover os `.ndjson` processados no final).
 
-### Por que a atualização não tira a API do ar
 
-Existem duas tabelas físicas, `empresa_a` e `empresa_b`, e uma view `empresa` apontando para uma
-delas. A API consulta sempre a view.
-
-1. A ingestão descobre qual slot está ocioso e recria só ele.
-2. Carrega os registros e cria os índices nesse slot. A API segue respondendo pelo slot antigo.
-3. Troca a view para o slot novo, dentro de uma transação. Quem estava no meio de um `SELECT`
-   termina lendo o slot antigo.
-
-O slot anterior fica intacto depois da troca, e é o caminho de volta se a carga nova vier ruim:
-basta apontar a view para ele. Passe `--descartar-anterior` para liberar o disco na hora e abrir
-mão desse retorno.
 
 O histórico de cargas fica na tabela `carga` e em `GET /carga`.
 
@@ -120,7 +108,7 @@ uma requisição por vez levaria minutos.
 
 ## Modelo de dados
 
-Uma linha por CNPJ em `empresa_{slot}`, com colunas tipadas. Índices, por ora, só onde as consultas
+Uma linha por CNPJ em `empresa`, com colunas tipadas. Índices, por ora, só onde as consultas
 batem: chave primária em `cnpj` e índice em `cnae_principal`.
 
 Código e descrição de CNAE, qualificação do responsável, motivo de situação cadastral e país são
@@ -133,8 +121,7 @@ pesado da base e entra inteiro, sem recorte.
 ### Disco
 
 A base tem dezenas de milhões de empresas e é um clone integral do OpenCNPJ, sem tirar nem pôr:
-todo campo da fonte, quadro societário incluído, está no banco. Reserve espaço para o `.zip`, para
-os `.ndjson` extraídos e para dois slots da tabela ao mesmo tempo.
+todo campo da fonte, quadro societário incluído, está no banco. Reserve espaço para a tabela no PostgreSQL. Você pode usar a flag `--limpar` no script de atualização para garantir que o zip e os arquivos temporários extraídos sejam removidos automaticamente após a importação.
 
 ### Ajustes do Postgres
 

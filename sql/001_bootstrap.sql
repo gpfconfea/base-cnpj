@@ -7,7 +7,6 @@ CREATE TABLE IF NOT EXISTS dominio (
 
 CREATE TABLE IF NOT EXISTS carga (
     id              bigserial PRIMARY KEY,
-    slot            text NOT NULL,
     status          text NOT NULL DEFAULT 'em_andamento',
     iniciada_em     timestamptz NOT NULL DEFAULT now(),
     concluida_em    timestamptz,

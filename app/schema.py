@@ -1,8 +1,6 @@
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
-SLOTS = ("a", "b")
-
 COLUNAS_JSON = ("telefones", "qsa")
 
 COLUNAS = (
@@ -46,7 +44,7 @@ COLUNAS = (
 )
 
 DDL = """
-CREATE TABLE empresa_{slot} (
+CREATE TABLE empresa (
     cnpj                            char(14) NOT NULL,
     razao_social                    text,
     nome_fantasia                   text,
@@ -88,8 +86,8 @@ CREATE TABLE empresa_{slot} (
 """
 
 INDICES = (
-    "ALTER TABLE empresa_{slot} ADD CONSTRAINT empresa_{slot}_pkey PRIMARY KEY (cnpj)",
-    "CREATE INDEX empresa_{slot}_cnae_idx ON empresa_{slot} (cnae_principal)",
+    "ALTER TABLE empresa ADD CONSTRAINT empresa_pkey PRIMARY KEY (cnpj)",
+    "CREATE INDEX empresa_cnae_idx ON empresa (cnae_principal)",
 )
 
 

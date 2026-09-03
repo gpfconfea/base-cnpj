@@ -13,16 +13,16 @@ from app.schema import COLUNAS, COLUNAS_JSON, DDL, INDICES, linha
 INDICES_JSON = tuple(COLUNAS.index(coluna) for coluna in COLUNAS_JSON)
 
 
-def _copy_sql(slot):
-    return "COPY empresa_{slot} ({colunas}) FROM STDIN".format(slot=slot, colunas=", ".join(COLUNAS))
+def _copy_sql():
+    return "COPY empresa ({colunas}) FROM STDIN".format(colunas=", ".join(COLUNAS))
 
 
-def carregar_arquivo(caminho, slot):
+def carregar_arquivo(caminho):
     dominios = {}
     lidos = 0
     invalidos = 0
     with db.conectar() as conn:
-        with conn.cursor() as cur, cur.copy(_copy_sql(slot)) as copy:
+        with conn.cursor() as cur, cur.copy(_copy_sql()) as copy:
             with open(caminho, "rb") as entrada:
                 for bruta in entrada:
                     bruta = bruta.strip()
@@ -49,24 +49,26 @@ def carregar_arquivo(caminho, slot):
     return caminho.name, lidos, invalidos, dominios
 
 
-def _trabalho(argumentos):
-    caminho, slot = argumentos
-    return carregar_arquivo(pathlib.Path(caminho), slot)
+def _trabalho(caminho):
+    return carregar_arquivo(pathlib.Path(caminho))
 
 
-def preparar_slot(conn, slot):
-    conn.execute(f"DROP TABLE IF EXISTS empresa_{slot}")
-    conn.execute(DDL.format(slot=slot))
+def preparar_tabela(conn):
+    conn.execute("DROP VIEW IF EXISTS empresa CASCADE")
+    conn.execute("DROP TABLE IF EXISTS empresa_a CASCADE")
+    conn.execute("DROP TABLE IF EXISTS empresa_b CASCADE")
+    conn.execute("DROP TABLE IF EXISTS empresa CASCADE")
+    conn.execute(DDL)
     conn.commit()
 
 
-def indexar(conn, slot):
+def indexar(conn):
     for comando in INDICES:
         inicio = time.monotonic()
-        conn.execute(comando.format(slot=slot))
+        conn.execute(comando)
         conn.commit()
-        print(f"[indice] {comando.format(slot=slot)[:60]}... {time.monotonic() - inicio:.0f}s")
-    conn.execute(f"ANALYZE empresa_{slot}")
+        print(f"[indice] {comando[:60]}... {time.monotonic() - inicio:.0f}s")
+    conn.execute("ANALYZE empresa")
     conn.commit()
 
 
@@ -82,24 +84,12 @@ def gravar_dominios(conn, dominios):
     conn.commit()
 
 
-def publicar(conn, slot):
-    """Aponta a view para o slot recem carregado dentro de uma transacao.
-
-    A troca e o unico momento em que a consulta para, e dura o tempo de um
-    CREATE OR REPLACE VIEW. Quem estiver no meio de um SELECT termina lendo o
-    slot antigo, que so e descartado depois.
-    """
-    with conn.transaction():
-        conn.execute(f"CREATE OR REPLACE VIEW empresa AS SELECT * FROM empresa_{slot}")
-
-
 def main():
     parser = argparse.ArgumentParser(description="Ingere os ndjson da base OpenCNPJ no PostgreSQL")
     parser.add_argument("--dir", default=None, help="diretorio com os .ndjson (padrao: DATA_DIR/ndjson)")
     parser.add_argument("--workers", type=int, default=config.WORKERS)
-    parser.add_argument("--slot", choices=("a", "b"), default=None)
-    parser.add_argument("--descartar-anterior", action="store_true")
     parser.add_argument("--limite-arquivos", type=int, default=0, help="carrega apenas os N primeiros arquivos")
+    parser.add_argument("--apagar", action="store_true", help="exclui os .ndjson extraídos ao final com sucesso")
     args = parser.parse_args()
 
     origem = pathlib.Path(args.dir) if args.dir else pathlib.Path(config.DATA_DIR) / "ndjson"
@@ -113,27 +103,21 @@ def main():
     conn = db.conectar()
     db.bootstrap(conn)
 
-    anterior = db.slot_ativo(conn)
-    slot = args.slot or db.slot_destino(conn)
-    if slot == anterior:
-        print(f"[erro] slot {slot} esta em uso pela view", file=sys.stderr)
-        return 1
-
     carga_id = conn.execute(
-        "INSERT INTO carga (slot, arquivos) VALUES (%s, %s) RETURNING id",
-        (slot, len(arquivos)),
+        "INSERT INTO carga (arquivos) VALUES (%s) RETURNING id",
+        (len(arquivos),),
     ).fetchone()[0]
     conn.commit()
 
-    print(f"[carga {carga_id}] slot={slot} anterior={anterior or '-'} arquivos={len(arquivos)}")
+    print(f"[carga {carga_id}] arquivos={len(arquivos)}")
     inicio = time.monotonic()
     total = 0
     total_invalidos = 0
     dominios = {}
 
     try:
-        preparar_slot(conn, slot)
-        tarefas = [(str(caminho), slot) for caminho in arquivos]
+        preparar_tabela(conn)
+        tarefas = [str(caminho) for caminho in arquivos]
         with ProcessPoolExecutor(max_workers=max(1, args.workers)) as pool:
             for indice, (nome, lidos, invalidos, citados) in enumerate(pool.map(_trabalho, tarefas), 1):
                 total += lidos
@@ -146,8 +130,7 @@ def main():
                 )
 
         gravar_dominios(conn, dominios)
-        indexar(conn, slot)
-        publicar(conn, slot)
+        indexar(conn)
 
         conn.execute(
             "UPDATE carga SET status = 'concluida', concluida_em = now(), total_registros = %s WHERE id = %s",
@@ -163,10 +146,10 @@ def main():
         conn.commit()
         raise
 
-    if args.descartar_anterior and anterior and anterior != slot:
-        conn.execute(f"DROP TABLE IF EXISTS empresa_{anterior}")
-        conn.commit()
-        print(f"[limpeza] empresa_{anterior} removida")
+    if args.apagar:
+        for caminho in arquivos:
+            caminho.unlink(missing_ok=True)
+        print(f"[limpeza] {len(arquivos)} arquivos removidos")
 
     print(
         f"[carga {carga_id}] concluida: {total} registros, {total_invalidos} descartados, "
