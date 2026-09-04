@@ -41,8 +41,13 @@ docker compose --profile manual run --rm ingestor -m app.baixar
 docker compose --profile manual run --rm ingestor -m app.ingerir
 ```
 
-`app.baixar` puxa o `data.zip` da fonte, com retomada por `Range` se a conexão cair, e extrai só os
-`.ndjson`. Aceita `--pular-download`, `--pular-extracao` e `--remover-zip`.
+`app.baixar` puxa o `data.zip` da fonte e extrai só os `.ndjson`. Aceita `--pular-download`,
+`--pular-extracao` e `--remover-zip`.
+
+O download sempre recomeça do zero: a origem anuncia `Accept-Ranges: bytes` mas responde `200` com o
+arquivo inteiro a um `GET` com `Range`, e retomar em modo append corrompia o zip. O arquivo é gravado
+em `data.zip.parcial` e só vira `data.zip` depois de o tamanho bater com o `Content-Length`; queda de
+conexão refaz o download (`DOWNLOAD_TENTATIVAS`, padrão 5).
 
 `app.ingerir` lê os arquivos em paralelo e joga tudo no Postgres via `COPY`. Aceita `--workers`,
 `--limite-arquivos` (útil para um teste com 2 ou 3 arquivos antes de encarar a base toda) e
@@ -117,6 +122,21 @@ poucos valores repetidos em dezenas de milhões de linhas, então a descrição 
 
 `telefones` e `QSA` ficam em `jsonb`, por serem listas de tamanho variável. O `QSA` é o campo mais
 pesado da base e entra inteiro, sem recorte.
+
+### Onde ficam o zip e os `.ndjson`
+
+No volume nomeado `dados`, dentro da VM do Docker — não numa pasta do host. Bind mount de pasta
+Windows no Docker Desktop passa por uma ponte de filesystem (9p/gRPC-FUSE) que derruba a escrita
+sequencial em várias vezes, e aqui são ~14 GB de zip mais as dezenas de GB de `.ndjson` extraídos.
+
+São arquivos descartáveis, só o ingestor os lê. Para liberar o espaço depois da carga:
+
+```bash
+docker volume rm base-cnpj_dados
+```
+
+Se por algum motivo você precisar dos arquivos visíveis no host, aponte `DATA_VOLUME` para um
+caminho (`DATA_VOLUME=./data`), ciente da perda de desempenho.
 
 ### Disco
 
