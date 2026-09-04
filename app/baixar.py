@@ -2,6 +2,7 @@ import argparse
 import os
 import pathlib
 import sys
+import time
 import zipfile
 
 import requests
@@ -9,42 +10,65 @@ import requests
 from app import config
 
 BLOCO = 1024 * 1024
+TENTATIVAS = int(os.getenv("DOWNLOAD_TENTATIVAS", "5"))
+ESPERA = 15
 
 
-def baixar(url, destino):
-    destino = pathlib.Path(destino)
-    destino.parent.mkdir(parents=True, exist_ok=True)
-
+def _tamanho_remoto(url):
     cabecalho = requests.head(url, timeout=60, allow_redirects=True)
     cabecalho.raise_for_status()
-    total = int(cabecalho.headers.get("Content-Length") or 0)
-    aceita_range = cabecalho.headers.get("Accept-Ranges", "").lower() == "bytes"
+    return int(cabecalho.headers.get("Content-Length") or 0)
 
-    baixado = destino.stat().st_size if destino.exists() else 0
-    if total and baixado == total:
-        print(f"[baixar] {destino.name} completo ({total} bytes), nada a fazer")
-        return destino
 
-    headers = {}
-    modo = "wb"
-    if baixado and aceita_range:
-        headers["Range"] = f"bytes={baixado}-"
-        modo = "ab"
-        print(f"[baixar] retomando de {baixado} bytes")
-    elif baixado:
-        print("[baixar] servidor nao aceita retomada, recomecando")
-        baixado = 0
-
-    with requests.get(url, stream=True, timeout=(60, 300), headers=headers) as resposta:
+def _tentativa(url, destino, total):
+    """Baixa o arquivo inteiro e devolve quantos bytes foram gravados."""
+    baixado = 0
+    with requests.get(url, stream=True, timeout=(60, 300)) as resposta:
         resposta.raise_for_status()
-        with open(destino, modo) as saida:
+        with open(destino, "wb") as saida:
             for pedaco in resposta.iter_content(BLOCO):
+                if not pedaco:
+                    continue
                 saida.write(pedaco)
                 baixado += len(pedaco)
                 if total:
                     pct = baixado * 100 // total
                     print(f"\r[baixar] {pct}% ({baixado}/{total})", end="", file=sys.stderr)
+                else:
+                    print(f"\r[baixar] {baixado} bytes", end="", file=sys.stderr)
     print("", file=sys.stderr)
+    return baixado
+
+
+def baixar(url, destino):
+    """Baixa sempre do zero: a origem nao honra Range e retomar corrompe o zip."""
+    destino = pathlib.Path(destino)
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    parcial = destino.with_suffix(destino.suffix + ".parcial")
+
+    total = _tamanho_remoto(url)
+    for antigo in (destino, parcial):
+        if antigo.exists():
+            print(f"[baixar] removendo {antigo.name} anterior ({antigo.stat().st_size} bytes)")
+            antigo.unlink()
+
+    erro = None
+    for tentativa in range(1, TENTATIVAS + 1):
+        try:
+            baixado = _tentativa(url, parcial, total)
+            if not total or baixado == total:
+                break
+            erro = RuntimeError(f"recebido {baixado} de {total} bytes")
+        except (requests.RequestException, OSError) as exc:
+            erro = exc
+        if tentativa == TENTATIVAS:
+            parcial.unlink(missing_ok=True)
+            raise RuntimeError(f"download falhou apos {TENTATIVAS} tentativas: {erro}")
+        print(f"[baixar] tentativa {tentativa}/{TENTATIVAS} falhou ({erro}), nova em {ESPERA}s")
+        time.sleep(ESPERA)
+
+    parcial.replace(destino)
+    print(f"[baixar] concluido ({destino.stat().st_size} bytes)")
     return destino
 
 
