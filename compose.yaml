@@ -36,6 +36,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+      # depois de uma carga interrompida o redo do WAL passa de 5 min; sem esta
+      # folga o banco e marcado unhealthy e todo depends_on falha junto
+      start_period: 600s
     networks:
       - base-cnpj
 
