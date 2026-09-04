@@ -94,8 +94,24 @@ INDICES = (
 def _texto(valor):
     if valor is None:
         return None
-    valor = str(valor).strip()
+    valor = str(valor).replace("\x00", "").strip()
     return valor or None
+
+
+def _sem_nulo(valor):
+    """Tira o byte 0x00 de dentro de telefones e QSA, recursivamente.
+
+    A fonte traz o escape do byte nulo no meio de alguns nomes. O Postgres o recusa
+    em text quanto em jsonb, e um unico registro assim aborta o COPY do arquivo
+    inteiro, por isso a limpeza acontece aqui.
+    """
+    if isinstance(valor, str):
+        return valor.replace("\x00", "")
+    if isinstance(valor, list):
+        return [_sem_nulo(item) for item in valor]
+    if isinstance(valor, dict):
+        return {_sem_nulo(chave): _sem_nulo(item) for chave, item in valor.items()}
+    return valor
 
 
 def _data(valor):
@@ -172,8 +188,8 @@ def linha(registro):
         dominios.append(("pais", pais, descricao))
 
     secundarios = [c for c in (_texto(x) for x in registro.get("cnaes_secundarios") or ()) if c]
-    telefones = registro.get("telefones") or []
-    qsa = registro.get("QSA") or []
+    telefones = _sem_nulo(registro.get("telefones") or [])
+    qsa = _sem_nulo(registro.get("QSA") or [])
     uf = _texto(registro.get("uf"))
 
     tupla = (

@@ -126,6 +126,21 @@ def test_qsa_vem_inteiro(convertido):
     assert valores["qsa"] == REGISTRO["QSA"]
 
 
+def test_nul_e_removido_dos_textos_e_do_jsonb():
+    tupla, _ = linha({
+        **REGISTRO,
+        "razao_social": "ACME\x00 LTDA",
+        "cnaes_secundarios": ["94995\x0000"],
+        "QSA": [{"nome_socio": "FRANCISCO\x00 FREIRE"}],
+        "telefones": [{"numero": "3321\x002869"}],
+    })
+    valores = dict(zip(COLUNAS, tupla))
+    assert valores["razao_social"] == "ACME LTDA"
+    assert valores["cnaes_secundarios"] == ["9499500"]
+    assert valores["qsa"] == [{"nome_socio": "FRANCISCO FREIRE"}]
+    assert valores["telefones"] == [{"numero": "33212869"}]
+
+
 def test_cnpj_curto_e_completado_com_zeros():
     tupla, _ = linha({**REGISTRO, "cnpj": "17782000139"})
     assert tupla[0] == "00017782000139"
