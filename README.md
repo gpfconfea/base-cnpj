@@ -114,7 +114,12 @@ uma requisição por vez levaria minutos.
 ## Modelo de dados
 
 Uma linha por CNPJ em `empresa`, com colunas tipadas. Índices, por ora, só onde as consultas
-batem: chave primária em `cnpj` e índice em `cnae_principal`.
+batem: chave primária em `cnpj` e índice composto em `(cnae_principal, uf)`.
+
+O composto atende tanto `/cnae/{codigo}` quanto `/cnae/{codigo}?uf=GO`, já que o CNAE é a primeira
+coluna. Um índice só de `uf` não valeria o espaço: são 27 valores distintos em dezenas de milhões de
+linhas, e para uma UF inteira o planejador prefere varrer a tabela a saltar milhões de vezes no
+heap.
 
 Código e descrição de CNAE, qualificação do responsável, motivo de situação cadastral e país são
 poucos valores repetidos em dezenas de milhões de linhas, então a descrição mora na tabela

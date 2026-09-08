@@ -87,7 +87,9 @@ CREATE TABLE empresa (
 
 INDICES = (
     "ALTER TABLE empresa ADD CONSTRAINT empresa_pkey PRIMARY KEY (cnpj)",
-    "CREATE INDEX empresa_cnae_idx ON empresa (cnae_principal)",
+    # composto porque a UF so aparece junto do CNAE em /cnae/{codigo}; com
+    # cnae_principal na frente, o mesmo indice atende a consulta sem filtro de UF
+    "CREATE INDEX empresa_cnae_uf_idx ON empresa (cnae_principal, uf)",
 )
 
 
