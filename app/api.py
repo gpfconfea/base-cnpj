@@ -205,7 +205,9 @@ def por_cnae(
     parametros = {"cnae": codigo, "limit": limit, "offset": offset}
 
     if inclui_secundario:
-        condicoes = ["(cnae_principal = %(cnae)s OR %(cnae)s = ANY(cnaes_secundarios))"]
+        # @> em vez de "= ANY(...)": e a forma que o indice GIN de
+        # cnaes_secundarios consegue atender
+        condicoes = ["(cnae_principal = %(cnae)s OR cnaes_secundarios @> ARRAY[%(cnae)s])"]
     else:
         condicoes = ["cnae_principal = %(cnae)s"]
     if uf:

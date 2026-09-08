@@ -90,6 +90,9 @@ INDICES = (
     # composto porque a UF so aparece junto do CNAE em /cnae/{codigo}; com
     # cnae_principal na frente, o mesmo indice atende a consulta sem filtro de UF
     "CREATE INDEX empresa_cnae_uf_idx ON empresa (cnae_principal, uf)",
+    # GIN porque cnaes_secundarios e text[]; so serve para o operador de
+    # continencia (@>), nao para o "= ANY(...)" que a consulta usava antes
+    "CREATE INDEX empresa_cnae_sec_idx ON empresa USING gin (cnaes_secundarios)",
 )
 
 
