@@ -62,6 +62,32 @@ def preparar_tabela(conn):
     conn.commit()
 
 
+def deduplicar(conn):
+    """Tira CNPJ repetido antes da PK.
+
+    A fonte traz o mesmo CNPJ em mais de um arquivo -- parte deles por causa do
+    zero a esquerda, que so aparece depois do zfill em _cnpj. Sem isso a criacao
+    da chave primaria falha com UniqueViolation no fim de uma carga inteira.
+    """
+    inicio = time.monotonic()
+    conn.execute("SET work_mem = '256MB'")
+    apagados = conn.execute(
+        """
+        DELETE FROM empresa WHERE ctid IN (
+            SELECT ctid FROM (
+                SELECT ctid, row_number() OVER (PARTITION BY cnpj ORDER BY ctid) AS n
+                FROM empresa
+            ) repetidos WHERE n > 1
+        )
+        """
+    ).rowcount
+    conn.commit()
+    conn.execute("RESET work_mem")
+    conn.commit()
+    print(f"[dedup] {apagados} duplicados removidos {time.monotonic() - inicio:.0f}s")
+    return apagados
+
+
 def indexar(conn):
     for comando in INDICES:
         inicio = time.monotonic()
@@ -130,6 +156,7 @@ def main():
                 )
 
         gravar_dominios(conn, dominios)
+        total -= deduplicar(conn)
         indexar(conn)
 
         conn.execute(
