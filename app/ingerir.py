@@ -5,6 +5,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 
 import orjson
+from psycopg import errors
 from psycopg.types.json import Jsonb
 
 from app import config, db
@@ -19,8 +20,10 @@ def _copy_sql():
 
 def carregar_arquivo(caminho):
     dominios = {}
+    vistos = set()
     lidos = 0
     invalidos = 0
+    repetidos = 0
     with db.conectar() as conn:
         with conn.cursor() as cur, cur.copy(_copy_sql()) as copy:
             with open(caminho, "rb") as entrada:
@@ -37,6 +40,10 @@ def carregar_arquivo(caminho):
                     if tupla is None:
                         invalidos += 1
                         continue
+                    if tupla[0] in vistos:
+                        repetidos += 1
+                        continue
+                    vistos.add(tupla[0])
                     valores = list(tupla)
                     for posicao in INDICES_JSON:
                         valores[posicao] = Jsonb(valores[posicao])
@@ -46,7 +53,7 @@ def carregar_arquivo(caminho):
                         if descricao and (tipo, codigo) not in dominios:
                             dominios[(tipo, codigo)] = descricao
         conn.commit()
-    return caminho.name, lidos, invalidos, dominios
+    return caminho.name, lidos, invalidos, repetidos, dominios
 
 
 def _trabalho(caminho):
@@ -63,11 +70,11 @@ def preparar_tabela(conn):
 
 
 def deduplicar(conn):
-    """Tira CNPJ repetido antes da PK.
+    """Rede de seguranca: tira do banco o CNPJ que aparece em mais de um arquivo.
 
-    A fonte traz o mesmo CNPJ em mais de um arquivo -- parte deles por causa do
-    zero a esquerda, que so aparece depois do zfill em _cnpj. Sem isso a criacao
-    da chave primaria falha com UniqueViolation no fim de uma carga inteira.
+    carregar_arquivo ja filtra a repeticao dentro de cada arquivo, que e de graca.
+    Isto aqui e caro -- ordena a tabela inteira e em disco lento custa minutos --,
+    por isso so roda quando a criacao da PK realmente acusa UniqueViolation.
     """
     inicio = time.monotonic()
     conn.execute("SET work_mem = '256MB'")
@@ -91,8 +98,15 @@ def deduplicar(conn):
 def indexar(conn):
     for comando in INDICES:
         inicio = time.monotonic()
-        conn.execute(comando)
-        conn.commit()
+        try:
+            conn.execute(comando)
+            conn.commit()
+        except errors.UniqueViolation:
+            # repetido em arquivos diferentes escapa do filtro de carregar_arquivo
+            conn.rollback()
+            deduplicar(conn)
+            conn.execute(comando)
+            conn.commit()
         print(f"[indice] {comando[:60]}... {time.monotonic() - inicio:.0f}s")
     conn.execute("ANALYZE empresa")
     conn.commit()
@@ -139,15 +153,17 @@ def main():
     inicio = time.monotonic()
     total = 0
     total_invalidos = 0
+    total_repetidos = 0
     dominios = {}
 
     try:
         preparar_tabela(conn)
         tarefas = [str(caminho) for caminho in arquivos]
         with ProcessPoolExecutor(max_workers=max(1, args.workers)) as pool:
-            for indice, (nome, lidos, invalidos, citados) in enumerate(pool.map(_trabalho, tarefas), 1):
+            for indice, (nome, lidos, invalidos, repetidos, citados) in enumerate(pool.map(_trabalho, tarefas), 1):
                 total += lidos
                 total_invalidos += invalidos
+                total_repetidos += repetidos
                 dominios.update(citados)
                 decorrido = time.monotonic() - inicio
                 print(
@@ -156,7 +172,6 @@ def main():
                 )
 
         gravar_dominios(conn, dominios)
-        total -= deduplicar(conn)
         indexar(conn)
 
         conn.execute(
@@ -180,7 +195,7 @@ def main():
 
     print(
         f"[carga {carga_id}] concluida: {total} registros, {total_invalidos} descartados, "
-        f"{time.monotonic() - inicio:.0f}s"
+        f"{total_repetidos} repetidos, {time.monotonic() - inicio:.0f}s"
     )
     return 0
 
