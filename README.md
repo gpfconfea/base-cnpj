@@ -91,14 +91,50 @@ curl "http://localhost:8006/cnae/7112000?uf=GO&situacao=Ativa&limit=200"
 | `uf` | filtra pela UF |
 | `situacao` | `Ativa`, `Baixada`, `Suspensa`, `Inapta`, `Nula` |
 | `codigo_municipio` | código do município na Receita |
+| `excluir_municipios` | códigos a deixar de fora, separados por vírgula |
 | `porte` | `Demais`, `ME`, `EPP` |
 | `matriz` | `true` só matriz, `false` só filial |
 | `inclui_secundario` | também quem tem o CNAE como secundário |
 | `formato` | `resumo` (padrão) ou `completo` |
+| `amostra` / `semente` | sorteio no conjunto todo, até 1000 |
 | `limit` / `offset` | paginação, até 1000 por página |
 
 O formato `resumo` traz o que basta para pareamento: CNPJ, razão social, CNAE com descrição,
 situação, data de início, porte, matriz ou filial, UF e município.
+
+#### Sortear em vez de paginar
+
+```bash
+curl "http://localhost:8006/cnae/7112000?uf=GO&situacao=Ativa&excluir_municipios=9373,9227&amostra=40&semente=evento-12"
+```
+
+Paginação e sorteio respondem a perguntas diferentes. `limit`/`offset` percorre o
+conjunto em ordem de CNPJ, que serve para varrer tudo. Já quem precisa de **uma amostra**
+não pode usar as primeiras N linhas: CNPJ não é identificador neutro, ele cresce com a data
+de registro, então a primeira página é a das empresas mais antigas do universo. Para montar
+grupo de controle isso é viés puro, porque idade da empresa tem tudo a ver com o
+comportamento que se quer comparar.
+
+Com `amostra`, a ordenação passa a ser `md5(cnpj || semente)`: uma permutação arbitrária e
+**reprodutível** do conjunto filtrado. A mesma semente devolve a mesma amostra enquanto a
+carga for a mesma, o que permite reconferir depois de onde saiu um número; sementes
+diferentes dão amostras independentes. O `offset` é ignorado nesse modo.
+
+A resposta ganha três campos: `amostra`, `semente` e `total` (quantas empresas o filtro
+alcança no banco todo). Os dois primeiros são ecoados de propósito, para o cliente
+distinguir uma base que sorteou de uma versão antiga que ignorou os parâmetros e devolveu a
+primeira página.
+
+`excluir_municipios` existe pelo mesmo caso de uso: o controle tem que sair de fora dos
+municípios onde a fiscalização passou, e filtrar depois de receber os dados desperdiçaria a
+maior parte da amostra justamente onde a atividade se concentra. Empresa sem município
+cadastrado também sai, já que não dá para garantir que ela não esteja num dos códigos
+excluídos.
+
+O custo é ordenar por hash o conjunto filtrado, sem índice que ajude. Para um CNAE dentro de
+uma UF, que é a consulta prevista, são milhares ou dezenas de milhares de linhas e a conta
+sai em milissegundos. Um CNAE muito comum pedido sem `uf` é outra história: aí a ordenação
+passa por milhões de linhas.
 
 ### `POST /cnpjs`
 

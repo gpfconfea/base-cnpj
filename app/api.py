@@ -184,16 +184,45 @@ def cargas():
     return {"cargas": linhas}
 
 
+def municipios_excluidos(texto):
+    """Lista de codigos de municipio a deixar de fora, vinda da query string."""
+    if not texto:
+        return []
+    return [pedaco.strip() for pedaco in texto.split(",") if pedaco.strip()]
+
+
+def clausula_de_ordem(amostra):
+    """ORDER BY da consulta por CNAE.
+
+    Sem `amostra`, a ordem e o CNPJ, que e estavel e pagina bem. Com `amostra`,
+    a ordem passa a ser o md5 do CNPJ com a semente: uma permutacao arbitraria e
+    reprodutivel do conjunto filtrado. A diferenca importa porque CNPJ nao e
+    identificador neutro, ele cresce com o tempo de registro. Ordenar por CNPJ e
+    cortar no limite devolve as empresas mais antigas do universo, nunca uma
+    fatia representativa dele.
+    """
+    if amostra:
+        return "ORDER BY md5(cnpj || %(semente)s) LIMIT %(amostra)s"
+    return "ORDER BY cnpj LIMIT %(limit)s OFFSET %(offset)s"
+
+
 @app.get("/cnae/{codigo}")
 def por_cnae(
     codigo: str,
     uf: str | None = None,
     situacao: str | None = Query(None, description="ex.: Ativa, Baixada, Suspensa"),
     codigo_municipio: str | None = None,
+    excluir_municipios: str | None = Query(
+        None, description="codigos de municipio a deixar de fora, separados por virgula"
+    ),
     porte: str | None = None,
     matriz: bool | None = Query(None, description="true devolve somente matriz"),
     inclui_secundario: bool = Query(False, description="considera tambem quem tem o CNAE como secundario"),
     formato: str = Query("resumo", pattern="^(resumo|completo)$"),
+    amostra: int | None = Query(
+        None, ge=1, le=1000, description="sorteia esta quantidade no conjunto todo, em vez de paginar"
+    ),
+    semente: str = Query("", description="fixa o sorteio: mesma semente, mesma amostra"),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
@@ -219,6 +248,12 @@ def por_cnae(
     if codigo_municipio:
         condicoes.append("codigo_municipio = %(municipio)s")
         parametros["municipio"] = codigo_municipio.strip()
+    excluidos = municipios_excluidos(excluir_municipios)
+    if excluidos:
+        # Empresa sem municipio tambem sai: nao da para garantir que ela nao
+        # esteja justamente num dos codigos que o chamador quis evitar.
+        condicoes.append("codigo_municipio <> ALL(%(excluidos)s)")
+        parametros["excluidos"] = excluidos
     if porte:
         condicoes.append("porte_empresa = %(porte)s")
         parametros["porte"] = porte.strip()
@@ -227,18 +262,34 @@ def por_cnae(
         parametros["matriz"] = "Matriz" if matriz else "Filial"
 
     filtro = " AND ".join(condicoes)
-    sql = f"SELECT {campos} FROM empresa WHERE {filtro} ORDER BY cnpj LIMIT %(limit)s OFFSET %(offset)s"
+    if amostra:
+        parametros["amostra"] = amostra
+        parametros["semente"] = semente
+    sql = f"SELECT {campos} FROM empresa WHERE {filtro} {clausula_de_ordem(amostra)}"
+
+    total = None
     with pool.connection() as conn:
         linhas = conn.execute(sql, parametros).fetchall()
+        if amostra:
+            total = conn.execute(
+                f"SELECT count(*) AS total FROM empresa WHERE {filtro}", parametros
+            ).fetchone()["total"]
 
     montar = montar_completo if formato == "completo" else montar_resumo
-    return {
+    resposta = {
         "cnae": codigo,
         "limit": limit,
         "offset": offset,
         "retornados": len(linhas),
         "empresas": [montar(item) for item in linhas],
     }
+    if amostra:
+        # Ecoados de proposito: e por eles que um cliente descobre se a base ja
+        # sabe sortear ou se ignorou os parametros e devolveu a primeira pagina.
+        resposta["amostra"] = amostra
+        resposta["semente"] = semente
+        resposta["total"] = total
+    return resposta
 
 
 class ConsultaLote(BaseModel):
