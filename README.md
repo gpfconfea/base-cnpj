@@ -133,6 +133,140 @@ poucos valores repetidos em dezenas de milhões de linhas, então a descrição 
 `telefones` e `QSA` ficam em `jsonb`, por serem listas de tamanho variável. O `QSA` é o campo mais
 pesado da base e entra inteiro, sem recorte.
 
+### Tabelas
+
+#### `empresa`
+
+Uma linha por estabelecimento. Definida em [`app/schema.py`](app/schema.py); a tabela é recriada a
+cada carga, então esta é sempre a estrutura vigente.
+
+**Identificação**
+
+| Coluna | Tipo | Observação |
+| --- | --- | --- |
+| `cnpj` | `char(14)` | chave primária, só dígitos, com zeros à esquerda |
+| `razao_social` | `text` | |
+| `nome_fantasia` | `text` | |
+| `matriz_filial` | `text` | `Matriz` ou `Filial` |
+| `porte_empresa` | `text` | `ME`, `EPP` ou `Demais` |
+| `natureza_juridica` | `text` | |
+| `capital_social` | `numeric(18,2)` | `"1.234.567,89"` da fonte convertido na ingestão |
+| `ente_federativo` | `text` | só para órgãos públicos |
+
+**Situação cadastral**
+
+| Coluna | Tipo | Observação |
+| --- | --- | --- |
+| `situacao_cadastral` | `text` | `Ativa`, `Baixada`, `Suspensa`, `Inapta`, `Nula` |
+| `data_situacao_cadastral` | `date` | |
+| `motivo_situacao_codigo` | `text` | descrição em `dominio`, tipo `motivo` |
+| `situacao_especial` | `text` | |
+| `data_situacao_especial` | `date` | |
+| `data_inicio_atividade` | `date` | |
+
+**Atividade econômica**
+
+| Coluna | Tipo | Observação |
+| --- | --- | --- |
+| `cnae_principal` | `text` | descrição em `dominio`, tipo `cnae` |
+| `cnaes_secundarios` | `text[]` | indexado com GIN |
+
+**Endereço**
+
+| Coluna | Tipo | Observação |
+| --- | --- | --- |
+| `tipo_logradouro` | `text` | |
+| `logradouro` | `text` | |
+| `numero` | `text` | texto porque a fonte traz `S/N` |
+| `complemento` | `text` | |
+| `bairro` | `text` | |
+| `cep` | `text` | 8 dígitos, sem máscara |
+| `uf` | `char(2)` | |
+| `municipio` | `text` | nome |
+| `codigo_municipio` | `text` | código da Receita |
+| `nome_cidade_exterior` | `text` | |
+| `codigo_pais` | `text` | descrição em `dominio`, tipo `pais` |
+
+**Contato**
+
+| Coluna | Tipo | Observação |
+| --- | --- | --- |
+| `email` | `text` | |
+| `telefones` | `jsonb` | lista de `{ddd, numero, is_fax}` |
+
+**Simples e MEI**
+
+| Coluna | Tipo |
+| --- | --- |
+| `opcao_simples` | `text` |
+| `data_opcao_simples` | `date` |
+| `data_exclusao_simples` | `date` |
+| `opcao_mei` | `text` |
+| `data_opcao_mei` | `date` |
+| `data_exclusao_mei` | `date` |
+
+**Quadro societário**
+
+| Coluna | Tipo | Observação |
+| --- | --- | --- |
+| `qualificacao_responsavel_codigo` | `text` | descrição em `dominio`, tipo `qualificacao` |
+| `qsa` | `jsonb` | lista de sócios, inteira, sem recorte |
+
+Campo vazio na fonte vira `NULL`, e data ausente ou `0000-00-00` também. O byte nulo (`0x00`), que a
+fonte traz dentro de alguns nomes, é removido na ingestão: o PostgreSQL o recusa em `text` e em
+`jsonb`.
+
+#### `dominio`
+
+Descrições que se repetem em dezenas de milhões de linhas. Criada por
+[`sql/001_bootstrap.sql`](sql/001_bootstrap.sql).
+
+| Coluna | Tipo | Observação |
+| --- | --- | --- |
+| `tipo` | `text` | `cnae`, `motivo`, `qualificacao` ou `pais` |
+| `codigo` | `text` | |
+| `descricao` | `text` | |
+
+Chave primária em `(tipo, codigo)`.
+
+#### `carga`
+
+Histórico de importações, exposto em `GET /carga`.
+
+| Coluna | Tipo | Observação |
+| --- | --- | --- |
+| `id` | `bigserial` | chave primária |
+| `status` | `text` | `em_andamento`, `concluida` ou `falhou` |
+| `iniciada_em` | `timestamptz` | |
+| `concluida_em` | `timestamptz` | |
+| `arquivos` | `integer` | quantos `.ndjson` a carga tinha |
+| `total_registros` | `bigint` | |
+| `erro` | `text` | mensagem, quando `falhou` |
+
+Índice `carga_concluida_idx` em `(concluida_em DESC NULLS LAST)`.
+
+### Índices
+
+| Índice | Tabela | Definição | Tamanho |
+| --- | --- | --- | ---: |
+| `empresa_pkey` | `empresa` | `PRIMARY KEY (cnpj)` | ~2,2 GB |
+| `empresa_cnae_uf_municipio_idx` | `empresa` | `(cnae_principal, uf, codigo_municipio)` | ~700 MB |
+| `empresa_cnae_sec_idx` | `empresa` | `GIN (cnaes_secundarios)` | ~600 MB |
+| `dominio_pkey` | `dominio` | `PRIMARY KEY (tipo, codigo)` | KB |
+| `carga_pkey` | `carga` | `PRIMARY KEY (id)` | KB |
+| `carga_concluida_idx` | `carga` | `(concluida_em DESC NULLS LAST)` | KB |
+
+Tamanhos para as ~72,7 milhões de linhas da carga de setembro de 2026. Os índices de `empresa` são
+criados **depois** do `COPY`, nunca antes: manter btree durante a carga trocaria escrita sequencial
+por escrita aleatória e multiplicaria o tempo de ingestão.
+
+Para conferir o que existe de fato no banco:
+
+```sql
+SELECT indexname, pg_size_pretty(pg_relation_size(indexname::regclass))
+FROM pg_indexes WHERE tablename = 'empresa';
+```
+
 ### Onde ficam o zip e os `.ndjson`
 
 No volume nomeado `dados`, dentro da VM do Docker — não numa pasta do host. Bind mount de pasta
