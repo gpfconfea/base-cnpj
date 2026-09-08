@@ -114,13 +114,14 @@ uma requisição por vez levaria minutos.
 ## Modelo de dados
 
 Uma linha por CNPJ em `empresa`, com colunas tipadas. Índices, por ora, só onde as consultas
-batem: chave primária em `cnpj`, índice composto em `(cnae_principal, uf)` e um GIN em
-`cnaes_secundarios`.
+batem: chave primária em `cnpj`, índice composto em `(cnae_principal, uf, codigo_municipio)` e um
+GIN em `cnaes_secundarios`.
 
-O composto atende tanto `/cnae/{codigo}` quanto `/cnae/{codigo}?uf=GO`, já que o CNAE é a primeira
-coluna. Um índice só de `uf` não valeria o espaço: são 27 valores distintos em dezenas de milhões de
-linhas, e para uma UF inteira o planejador prefere varrer a tabela a saltar milhões de vezes no
-heap.
+Pela regra da coluna à esquerda, o composto atende `/cnae/{codigo}`, `?uf=GO` e
+`?uf=GO&codigo_municipio=...` com um índice só. Vale saber que **filtrar por município sem informar a
+UF** aproveita apenas o CNAE — passe os dois juntos. Índices separados de `uf` ou de `municipio` não
+valeriam o espaço: são poucos valores distintos em dezenas de milhões de linhas, e o planejador
+prefere varrer a tabela a saltar milhões de vezes no heap.
 
 O GIN atende `?inclui_secundario=true`. Por isso a consulta usa `cnaes_secundarios @> ARRAY[...]` e
 não `... = ANY(cnaes_secundarios)`: só a forma com o operador de continência é indexável.
