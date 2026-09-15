@@ -242,13 +242,14 @@ def montar_filtro(
     Serve GET /cnae/{codigo} e POST /busca: os dois respondem a mesma pergunta,
     o segundo so aceita listas grandes demais para uma query string.
     """
-    parametros = {"cnae": cnae}
+    codigos = [cnae] if isinstance(cnae, str) else list(cnae)
+    parametros = {"cnaes": codigos}
+    # = ANY(...) no cnae_principal continua usando o composto (btree aceita a
+    # lista); no secundario e && (sobreposicao), que o GIN atende
     if inclui_secundario:
-        # @> em vez de "= ANY(...)": e a forma que o indice GIN de
-        # cnaes_secundarios consegue atender
-        condicoes = ["(cnae_principal = %(cnae)s OR cnaes_secundarios @> ARRAY[%(cnae)s])"]
+        condicoes = ["(cnae_principal = ANY(%(cnaes)s) OR cnaes_secundarios && %(cnaes)s)"]
     else:
-        condicoes = ["cnae_principal = %(cnae)s"]
+        condicoes = ["cnae_principal = ANY(%(cnaes)s)"]
     if uf:
         condicoes.append("uf = %(uf)s")
         parametros["uf"] = uf.strip().upper()[:2]
@@ -393,7 +394,8 @@ class Busca(BaseModel):
     milhares de CNPJs, mais do que cabe numa query string.
     """
 
-    cnae: str
+    cnae: str | None = None
+    cnaes: list[str] = Field(default_factory=list, max_length=100)
     uf: str | None = None
     situacao: str | None = None
     codigo_municipio: str | None = None
@@ -415,9 +417,12 @@ class Busca(BaseModel):
 
 @app.post("/busca")
 def busca(consulta: Busca):
-    codigo = _codigo_cnae(consulta.cnae)
+    """Aceita `cnae` (um) ou `cnaes` (varios); a empresa entra se tiver qualquer um deles."""
+    codigos = list(dict.fromkeys(_cnaes(consulta.cnaes) + ([_codigo_cnae(consulta.cnae)] if consulta.cnae else [])))
+    if not codigos:
+        raise HTTPException(status_code=400, detail="Informe ao menos um CNAE")
     filtro, parametros = montar_filtro(
-        codigo,
+        codigos,
         uf=consulta.uf,
         situacao=consulta.situacao,
         codigo_municipio=consulta.codigo_municipio,
@@ -433,7 +438,7 @@ def busca(consulta: Busca):
         excluir_cnpjs=consulta.excluir_cnpjs,
     )
     return consultar_por_cnae(
-        codigo, filtro, parametros, consulta.formato, consulta.limit, consulta.offset,
+        ",".join(codigos), filtro, parametros, consulta.formato, consulta.limit, consulta.offset,
         com_total=consulta.com_total,
     )
 

@@ -160,7 +160,8 @@ curl -X POST http://localhost:8006/busca   -H 'Content-Type: application/json'  
 ```
 
 Mesmos filtros de `GET /cnae/{codigo}` e mesma resposta, com `total` incluído por padrão
-(`com_total: false` desliga). A diferença é `excluir_cnpjs`, até 20.000 CNPJs que ficam fora do
+(`com_total: false` desliga). O CNAE vai em `cnae` (um) ou `cnaes` (lista, até 100): a empresa entra
+se tiver qualquer um deles como principal (ou como secundário, com `inclui_secundario`). A diferença é `excluir_cnpjs`, até 20.000 CNPJs que ficam fora do
 resultado. O caso de uso é a preparação de evento no FTNF: quem monta a lista de alvos refaz a busca
 e não quer ver de novo quem já está nela, e a lista tem centenas ou milhares de CNPJs, mais do que
 cabe numa query string. Não há sorteio nesta rota; para amostra, use `GET /cnae/{codigo}`.

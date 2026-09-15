@@ -22,8 +22,21 @@ CNAES = [
 def test_filtro_minimo_e_so_o_cnae_principal():
     filtro, parametros = montar_filtro("7112000")
 
-    assert filtro == "cnae_principal = %(cnae)s"
-    assert parametros == {"cnae": "7112000"}
+    assert filtro == "cnae_principal = ANY(%(cnaes)s)"
+    assert parametros == {"cnaes": ["7112000"]}
+
+
+def test_varios_cnaes_principais_entram_na_mesma_lista():
+    filtro, parametros = montar_filtro(["1011201", "1012101"], inclui_secundario=True)
+
+    assert "cnae_principal = ANY(%(cnaes)s)" in filtro
+    assert "cnaes_secundarios && %(cnaes)s" in filtro
+    assert parametros["cnaes"] == ["1011201", "1012101"]
+
+
+def test_busca_aceita_cnae_unico_ou_lista():
+    assert Busca(cnae="7112000").cnaes == []
+    assert Busca(cnaes=["7112000", "4120400"]).cnae is None
 
 
 def test_capital_e_inicio_de_atividade_viram_intervalos():
