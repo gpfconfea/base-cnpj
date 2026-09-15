@@ -78,19 +78,25 @@ def test_excluir_municipios_aceita_texto_e_lista():
 
 
 def test_busca_por_cnae_com_digitos_olha_o_inicio_do_codigo():
-    encontrados = filtrar_cnaes(CNAES, "711", 50)
+    encontrados, total = filtrar_cnaes(CNAES, "711", 50)
 
     assert [c["codigo"] for c in encontrados] == ["7111100", "7112000"]
+    assert total == 2
 
 
 def test_busca_por_cnae_com_texto_ignora_acento_e_caixa():
-    encontrados = filtrar_cnaes(CNAES, "CONSTRUCAO", 50)
+    encontrados, _ = filtrar_cnaes(CNAES, "CONSTRUCAO", 50)
 
     assert [c["codigo"] for c in encontrados] == ["4120400"]
 
 
-def test_busca_por_cnae_respeita_o_limite():
-    assert len(filtrar_cnaes(CNAES, "", 2)) == 2
+def test_busca_por_cnae_pagina_e_conta_o_total():
+    primeira, total = filtrar_cnaes(CNAES, "", 2)
+    segunda, _ = filtrar_cnaes(CNAES, "", 2, offset=2)
+
+    assert [c["codigo"] for c in primeira] == ["4120400", "7111100"]
+    assert [c["codigo"] for c in segunda] == ["7112000"]
+    assert total == 3
 
 
 def test_cnae_sem_digito_e_rejeitado():

@@ -444,11 +444,12 @@ def _sem_acento(texto):
     ).casefold()
 
 
-def filtrar_cnaes(itens, termo, limit):
+def filtrar_cnaes(itens, termo, limit, offset=0):
     """CNAEs cujo codigo comeca pelo termo ou cuja descricao o contem.
 
     Roda em memoria: sao pouco mais de mil codigos, ja carregados para
-    recompor as descricoes das empresas.
+    recompor as descricoes das empresas. Devolve (pagina, total) para o
+    cliente saber se ha mais.
     """
     termo = str(termo or "").strip()
     digitos = "".join(c for c in termo if c.isdigit())
@@ -464,9 +465,7 @@ def filtrar_cnaes(itens, termo, limit):
             bate = texto in _sem_acento(descricao)
         if bate:
             encontrados.append({"codigo": codigo, "descricao": descricao})
-            if len(encontrados) >= limit:
-                break
-    return encontrados
+    return encontrados[offset : offset + limit], len(encontrados)
 
 
 @app.get("/cnaes")
@@ -474,12 +473,14 @@ def cnaes(
     q: str = Query("", description="inicio do codigo ou trecho da descricao"),
     codigos: str | None = Query(None, description="devolve so estes codigos, separados por virgula"),
     limit: int = Query(50, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
 ):
     itens = [(codigo, descricao) for (tipo, codigo), descricao in dominios().items() if tipo == "cnae"]
     pedidos = set(_cnaes(codigos))
     if pedidos:
         itens = [item for item in itens if item[0] in pedidos]
-    return {"cnaes": filtrar_cnaes(itens, q, limit)}
+    pagina, total = filtrar_cnaes(itens, q, limit, offset)
+    return {"cnaes": pagina, "total": total, "limit": limit, "offset": offset}
 
 
 @app.get("/municipios")

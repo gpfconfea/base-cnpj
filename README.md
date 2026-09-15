@@ -175,7 +175,8 @@ curl "http://localhost:8006/cnaes?codigos=7112000,4120400"
 
 Termo só com dígitos casa o início do código; com letras, casa trecho da descrição, sem acento e
 sem diferença de caixa. `codigos` devolve só os informados, para recompor rótulos. Lido do cache de
-`dominio`, sem ir ao banco. `limit` padrão 50, até 2000.
+`dominio`, sem ir ao banco. Pagina com `limit` (padrão 50, até 2000) e `offset`, e a resposta traz
+`total` para o cliente saber se há mais.
 
 ### `GET /municipios`
 
