@@ -51,7 +51,15 @@ conexão refaz o download (`DOWNLOAD_TENTATIVAS`, padrão 5).
 
 `app.ingerir` lê os arquivos em paralelo e joga tudo no Postgres via `COPY`. Aceita `--workers`,
 `--limite-arquivos` (útil para um teste com 2 ou 3 arquivos antes de encarar a base toda) e
-`--apagar` (para remover os `.ndjson` processados no final).
+`--apagar` (para remover os `.ndjson` processados no final). No fim, depois dos índices, refaz as
+tabelas derivadas (`municipio`).
+
+Base carregada antes de a tabela `municipio` existir só precisa do passo de derivação, sem
+recarregar nada:
+
+```bash
+docker compose --profile manual run --rm ingestor -m app.derivar
+```
 
 
 
@@ -65,6 +73,9 @@ O histórico de cargas fica na tabela `carga` e em `GET /carga`.
 | `GET /carga` | as dez últimas cargas, com contagem e status |
 | `GET /{cnpj}` | dados de uma empresa |
 | `GET /cnae/{codigo}` | empresas com o CNAE informado |
+| `POST /busca` | os mesmos filtros de `/cnae/{codigo}`, em JSON, mais uma lista de CNPJs a excluir |
+| `GET /cnaes` | códigos CNAE com descrição, por início do código ou trecho do texto |
+| `GET /municipios` | municípios de uma UF com empresas na base |
 | `POST /cnpjs` | consulta em lote, até 1000 CNPJs |
 
 Sem token e sem limite de requisição, como combinado. A API é de leitura: nenhuma rota escreve no
@@ -95,6 +106,10 @@ curl "http://localhost:8006/cnae/7112000?uf=GO&situacao=Ativa&limit=200"
 | `porte` | `Demais`, `ME`, `EPP` |
 | `matriz` | `true` só matriz, `false` só filial |
 | `inclui_secundario` | também quem tem o CNAE como secundário |
+| `capital_min` / `capital_max` | faixa de capital social |
+| `inicio_de` / `inicio_ate` | faixa da data de início de atividade (`AAAA-MM-DD`) |
+| `cnaes_secundarios` | só quem tem ao menos um destes códigos como CNAE secundário, separados por vírgula |
+| `com_total` | `true` também devolve `total`, quantas empresas o filtro alcança |
 | `formato` | `resumo` (padrão) ou `completo` |
 | `amostra` / `semente` | sorteio no conjunto todo, até 1000 |
 | `limit` / `offset` | paginação, até 1000 por página |
@@ -136,6 +151,42 @@ uma UF, que é a consulta prevista, são milhares ou dezenas de milhares de linh
 sai em milissegundos. Um CNAE muito comum pedido sem `uf` é outra história: aí a ordenação
 passa por milhões de linhas.
 
+### `POST /busca`
+
+```bash
+curl -X POST http://localhost:8006/busca   -H 'Content-Type: application/json'   -d '{"cnae": "7112000", "uf": "GO", "situacao": "Ativa", "capital_min": 100000,
+       "inicio_de": "2015-01-01", "cnaes_secundarios": ["4120400"],
+       "excluir_cnpjs": ["00081395000102"], "limit": 50, "offset": 0}'
+```
+
+Mesmos filtros de `GET /cnae/{codigo}` e mesma resposta, com `total` incluído por padrão
+(`com_total: false` desliga). A diferença é `excluir_cnpjs`, até 20.000 CNPJs que ficam fora do
+resultado. O caso de uso é a preparação de evento no FTNF: quem monta a lista de alvos refaz a busca
+e não quer ver de novo quem já está nela, e a lista tem centenas ou milhares de CNPJs, mais do que
+cabe numa query string. Não há sorteio nesta rota; para amostra, use `GET /cnae/{codigo}`.
+
+### `GET /cnaes`
+
+```bash
+curl "http://localhost:8006/cnaes?q=engenharia"
+curl "http://localhost:8006/cnaes?q=711"
+curl "http://localhost:8006/cnaes?codigos=7112000,4120400"
+```
+
+Termo só com dígitos casa o início do código; com letras, casa trecho da descrição, sem acento e
+sem diferença de caixa. `codigos` devolve só os informados, para recompor rótulos. Lido do cache de
+`dominio`, sem ir ao banco. `limit` padrão 50, até 2000.
+
+### `GET /municipios`
+
+```bash
+curl "http://localhost:8006/municipios?uf=GO&q=goi"
+```
+
+Municípios da UF que têm empresa na base, do mais populoso ao menos, cada um com `codigo` (o da
+Receita, o mesmo aceito em `codigo_municipio`), `nome` e `empresas`. Vem da tabela derivada
+`municipio`; numa carga anterior à tabela a rota responde `503` até rodar `app.derivar`.
+
 ### `POST /cnpjs`
 
 ```bash
@@ -159,8 +210,11 @@ UF** aproveita apenas o CNAE — passe os dois juntos. Índices separados de `uf
 valeriam o espaço: são poucos valores distintos em dezenas de milhões de linhas, e o planejador
 prefere varrer a tabela a saltar milhões de vezes no heap.
 
-O GIN atende `?inclui_secundario=true`. Por isso a consulta usa `cnaes_secundarios @> ARRAY[...]` e
-não `... = ANY(cnaes_secundarios)`: só a forma com o operador de continência é indexável.
+O GIN atende `?inclui_secundario=true` e `cnaes_secundarios=...`. Por isso a consulta usa
+`cnaes_secundarios @> ARRAY[...]` e `cnaes_secundarios && ARRAY[...]`, nunca
+`... = ANY(cnaes_secundarios)`: só os operadores de continência e sobreposição são indexáveis. Os
+filtros de capital social e data de início não têm índice próprio: aplicam-se sobre as linhas que o
+composto já selecionou por CNAE e UF, que são milhares, não milhões.
 
 Código e descrição de CNAE, qualificação do responsável, motivo de situação cadastral e país são
 poucos valores repetidos em dezenas de milhões de linhas, então a descrição mora na tabela
@@ -281,6 +335,21 @@ Histórico de importações, exposto em `GET /carga`.
 
 Índice `carga_concluida_idx` em `(concluida_em DESC NULLS LAST)`.
 
+#### `municipio`
+
+Derivada de `empresa` no fim de cada carga (`app.derivar`): uma linha por par UF e código de
+município com ao menos uma empresa. Existe porque listar os municípios de uma UF direto em
+`empresa` é um `GROUP BY` sobre milhões de linhas a cada abertura de tela.
+
+| Coluna | Tipo | Observação |
+| --- | --- | --- |
+| `uf` | `char(2)` | |
+| `codigo` | `text` | código do município na Receita |
+| `nome` | `text` | |
+| `empresas` | `bigint` | quantas empresas têm esse município |
+
+Chave primária em `(uf, codigo)`.
+
 ### Índices
 
 | Índice | Tabela | Definição | Tamanho |
@@ -291,6 +360,7 @@ Histórico de importações, exposto em `GET /carga`.
 | `dominio_pkey` | `dominio` | `PRIMARY KEY (tipo, codigo)` | KB |
 | `carga_pkey` | `carga` | `PRIMARY KEY (id)` | KB |
 | `carga_concluida_idx` | `carga` | `(concluida_em DESC NULLS LAST)` | KB |
+| `municipio_pkey` | `municipio` | `PRIMARY KEY (uf, codigo)` | KB |
 
 Tamanhos para as ~72,7 milhões de linhas da carga de setembro de 2026. Os índices de `empresa` são
 criados **depois** do `COPY`, nunca antes: manter btree durante a carga trocaria escrita sequencial

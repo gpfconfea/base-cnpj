@@ -96,6 +96,22 @@ INDICES = (
     "CREATE INDEX empresa_cnae_sec_idx ON empresa USING gin (cnaes_secundarios)",
 )
 
+# Tabelas derivadas de `empresa`, refeitas a cada carga depois dos indices.
+# `municipio` existe porque listar os municipios de uma UF direto em `empresa`
+# e um GROUP BY sobre milhoes de linhas a cada abertura de tela; aqui sao
+# poucos milhares de linhas lidas de uma vez.
+DERIVADAS = (
+    "DROP TABLE IF EXISTS municipio",
+    """
+    CREATE TABLE municipio AS
+    SELECT uf, codigo_municipio AS codigo, min(municipio) AS nome, count(*) AS empresas
+    FROM empresa
+    WHERE uf IS NOT NULL AND codigo_municipio IS NOT NULL
+    GROUP BY uf, codigo_municipio
+    """,
+    "ALTER TABLE municipio ADD CONSTRAINT municipio_pkey PRIMARY KEY (uf, codigo)",
+)
+
 
 def _texto(valor):
     if valor is None:

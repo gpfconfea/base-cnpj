@@ -9,6 +9,7 @@ from psycopg import errors
 from psycopg.types.json import Jsonb
 
 from app import config, db
+from app.derivar import derivar
 from app.schema import COLUNAS, COLUNAS_JSON, DDL, INDICES, linha
 
 INDICES_JSON = tuple(COLUNAS.index(coluna) for coluna in COLUNAS_JSON)
@@ -173,6 +174,7 @@ def main():
 
         gravar_dominios(conn, dominios)
         indexar(conn)
+        derivar(conn)
 
         conn.execute(
             "UPDATE carga SET status = 'concluida', concluida_em = now(), total_registros = %s WHERE id = %s",

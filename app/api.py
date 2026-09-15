@@ -1,9 +1,13 @@
 import time
+import unicodedata
 from contextlib import asynccontextmanager
+from datetime import date
+from decimal import Decimal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from psycopg.errors import UndefinedTable
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
@@ -206,33 +210,39 @@ def clausula_de_ordem(amostra):
     return "ORDER BY cnpj LIMIT %(limit)s OFFSET %(offset)s"
 
 
-@app.get("/cnae/{codigo}")
-def por_cnae(
-    codigo: str,
-    uf: str | None = None,
-    situacao: str | None = Query(None, description="ex.: Ativa, Baixada, Suspensa"),
-    codigo_municipio: str | None = None,
-    excluir_municipios: str | None = Query(
-        None, description="codigos de municipio a deixar de fora, separados por virgula"
-    ),
-    porte: str | None = None,
-    matriz: bool | None = Query(None, description="true devolve somente matriz"),
-    inclui_secundario: bool = Query(False, description="considera tambem quem tem o CNAE como secundario"),
-    formato: str = Query("resumo", pattern="^(resumo|completo)$"),
-    amostra: int | None = Query(
-        None, ge=1, le=1000, description="sorteia esta quantidade no conjunto todo, em vez de paginar"
-    ),
-    semente: str = Query("", description="fixa o sorteio: mesma semente, mesma amostra"),
-    limit: int = Query(100, ge=1, le=1000),
-    offset: int = Query(0, ge=0),
+def _lista(valor):
+    """Lista de codigos vinda de query string (separados por virgula) ou de JSON."""
+    if isinstance(valor, str):
+        return municipios_excluidos(valor)
+    return [str(item).strip() for item in valor or () if str(item).strip()]
+
+
+def _cnaes(valor):
+    return ["".join(c for c in item if c.isdigit()) for item in _lista(valor) if any(c.isdigit() for c in item)]
+
+
+def montar_filtro(
+    cnae,
+    uf=None,
+    situacao=None,
+    codigo_municipio=None,
+    excluir_municipios=None,
+    porte=None,
+    matriz=None,
+    inclui_secundario=False,
+    capital_min=None,
+    capital_max=None,
+    inicio_de=None,
+    inicio_ate=None,
+    cnaes_secundarios=None,
+    excluir_cnpjs=None,
 ):
-    codigo = "".join(c for c in codigo if c.isdigit())
-    if not codigo:
-        raise HTTPException(status_code=400, detail="CNAE invalido")
+    """WHERE da consulta por CNAE e os parametros que ele referencia.
 
-    campos = "*" if formato == "completo" else ", ".join(CAMPOS_RESUMO)
-    parametros = {"cnae": codigo, "limit": limit, "offset": offset}
-
+    Serve GET /cnae/{codigo} e POST /busca: os dois respondem a mesma pergunta,
+    o segundo so aceita listas grandes demais para uma query string.
+    """
+    parametros = {"cnae": cnae}
     if inclui_secundario:
         # @> em vez de "= ANY(...)": e a forma que o indice GIN de
         # cnaes_secundarios consegue atender
@@ -247,8 +257,8 @@ def por_cnae(
         parametros["situacao"] = situacao.strip()
     if codigo_municipio:
         condicoes.append("codigo_municipio = %(municipio)s")
-        parametros["municipio"] = codigo_municipio.strip()
-    excluidos = municipios_excluidos(excluir_municipios)
+        parametros["municipio"] = str(codigo_municipio).strip()
+    excluidos = _lista(excluir_municipios)
     if excluidos:
         # Empresa sem municipio tambem sai: nao da para garantir que ela nao
         # esteja justamente num dos codigos que o chamador quis evitar.
@@ -260,8 +270,33 @@ def por_cnae(
     if matriz is not None:
         condicoes.append("matriz_filial = %(matriz)s")
         parametros["matriz"] = "Matriz" if matriz else "Filial"
+    if capital_min is not None:
+        condicoes.append("capital_social >= %(capital_min)s")
+        parametros["capital_min"] = capital_min
+    if capital_max is not None:
+        condicoes.append("capital_social <= %(capital_max)s")
+        parametros["capital_max"] = capital_max
+    if inicio_de:
+        condicoes.append("data_inicio_atividade >= %(inicio_de)s")
+        parametros["inicio_de"] = inicio_de
+    if inicio_ate:
+        condicoes.append("data_inicio_atividade <= %(inicio_ate)s")
+        parametros["inicio_ate"] = inicio_ate
+    secundarios = _cnaes(cnaes_secundarios)
+    if secundarios:
+        # && (sobreposicao) tambem e atendido pelo GIN: basta ter um dos codigos
+        condicoes.append("cnaes_secundarios && %(secundarios)s")
+        parametros["secundarios"] = secundarios
+    cnpjs_fora = [c for c in (_limpar_cnpj(item) for item in _lista(excluir_cnpjs)) if c]
+    if cnpjs_fora:
+        condicoes.append("cnpj <> ALL(%(cnpjs_fora)s)")
+        parametros["cnpjs_fora"] = cnpjs_fora
+    return " AND ".join(condicoes), parametros
 
-    filtro = " AND ".join(condicoes)
+
+def consultar_por_cnae(codigo, filtro, parametros, formato, limit, offset, amostra=None, semente="", com_total=False):
+    campos = "*" if formato == "completo" else ", ".join(CAMPOS_RESUMO)
+    parametros = dict(parametros, limit=limit, offset=offset)
     if amostra:
         parametros["amostra"] = amostra
         parametros["semente"] = semente
@@ -270,7 +305,7 @@ def por_cnae(
     total = None
     with pool.connection() as conn:
         linhas = conn.execute(sql, parametros).fetchall()
-        if amostra:
+        if amostra or com_total:
             total = conn.execute(
                 f"SELECT count(*) AS total FROM empresa WHERE {filtro}", parametros
             ).fetchone()["total"]
@@ -288,8 +323,190 @@ def por_cnae(
         # sabe sortear ou se ignorou os parametros e devolveu a primeira pagina.
         resposta["amostra"] = amostra
         resposta["semente"] = semente
+    if amostra or com_total:
         resposta["total"] = total
     return resposta
+
+
+def _codigo_cnae(valor):
+    codigo = "".join(c for c in str(valor or "") if c.isdigit())
+    if not codigo:
+        raise HTTPException(status_code=400, detail="CNAE invalido")
+    return codigo
+
+
+@app.get("/cnae/{codigo}")
+def por_cnae(
+    codigo: str,
+    uf: str | None = None,
+    situacao: str | None = Query(None, description="ex.: Ativa, Baixada, Suspensa"),
+    codigo_municipio: str | None = None,
+    excluir_municipios: str | None = Query(
+        None, description="codigos de municipio a deixar de fora, separados por virgula"
+    ),
+    porte: str | None = None,
+    matriz: bool | None = Query(None, description="true devolve somente matriz"),
+    inclui_secundario: bool = Query(False, description="considera tambem quem tem o CNAE como secundario"),
+    capital_min: Decimal | None = Query(None, ge=0, description="capital social minimo"),
+    capital_max: Decimal | None = Query(None, ge=0, description="capital social maximo"),
+    inicio_de: date | None = Query(None, description="inicio de atividade a partir de (AAAA-MM-DD)"),
+    inicio_ate: date | None = Query(None, description="inicio de atividade ate (AAAA-MM-DD)"),
+    cnaes_secundarios: str | None = Query(
+        None, description="devolve quem tem ao menos um destes codigos como CNAE secundario, separados por virgula"
+    ),
+    com_total: bool = Query(False, description="tambem conta quantas empresas o filtro alcanca"),
+    formato: str = Query("resumo", pattern="^(resumo|completo)$"),
+    amostra: int | None = Query(
+        None, ge=1, le=1000, description="sorteia esta quantidade no conjunto todo, em vez de paginar"
+    ),
+    semente: str = Query("", description="fixa o sorteio: mesma semente, mesma amostra"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    codigo = _codigo_cnae(codigo)
+    filtro, parametros = montar_filtro(
+        codigo,
+        uf=uf,
+        situacao=situacao,
+        codigo_municipio=codigo_municipio,
+        excluir_municipios=excluir_municipios,
+        porte=porte,
+        matriz=matriz,
+        inclui_secundario=inclui_secundario,
+        capital_min=capital_min,
+        capital_max=capital_max,
+        inicio_de=inicio_de,
+        inicio_ate=inicio_ate,
+        cnaes_secundarios=cnaes_secundarios,
+    )
+    return consultar_por_cnae(
+        codigo, filtro, parametros, formato, limit, offset,
+        amostra=amostra, semente=semente, com_total=com_total,
+    )
+
+
+class Busca(BaseModel):
+    """Mesmos filtros de GET /cnae/{codigo}, em JSON.
+
+    Existe por causa de `excluir_cnpjs`: quem monta a lista de alvos de um
+    evento precisa tirar do resultado quem ja esta nela, e sao centenas ou
+    milhares de CNPJs, mais do que cabe numa query string.
+    """
+
+    cnae: str
+    uf: str | None = None
+    situacao: str | None = None
+    codigo_municipio: str | None = None
+    excluir_municipios: list[str] = Field(default_factory=list)
+    porte: str | None = None
+    matriz: bool | None = None
+    inclui_secundario: bool = False
+    capital_min: Decimal | None = Field(None, ge=0)
+    capital_max: Decimal | None = Field(None, ge=0)
+    inicio_de: date | None = None
+    inicio_ate: date | None = None
+    cnaes_secundarios: list[str] = Field(default_factory=list)
+    excluir_cnpjs: list[str] = Field(default_factory=list, max_length=20000)
+    com_total: bool = True
+    formato: str = Field("resumo", pattern="^(resumo|completo)$")
+    limit: int = Field(100, ge=1, le=1000)
+    offset: int = Field(0, ge=0)
+
+
+@app.post("/busca")
+def busca(consulta: Busca):
+    codigo = _codigo_cnae(consulta.cnae)
+    filtro, parametros = montar_filtro(
+        codigo,
+        uf=consulta.uf,
+        situacao=consulta.situacao,
+        codigo_municipio=consulta.codigo_municipio,
+        excluir_municipios=consulta.excluir_municipios,
+        porte=consulta.porte,
+        matriz=consulta.matriz,
+        inclui_secundario=consulta.inclui_secundario,
+        capital_min=consulta.capital_min,
+        capital_max=consulta.capital_max,
+        inicio_de=consulta.inicio_de,
+        inicio_ate=consulta.inicio_ate,
+        cnaes_secundarios=consulta.cnaes_secundarios,
+        excluir_cnpjs=consulta.excluir_cnpjs,
+    )
+    return consultar_por_cnae(
+        codigo, filtro, parametros, consulta.formato, consulta.limit, consulta.offset,
+        com_total=consulta.com_total,
+    )
+
+
+def _sem_acento(texto):
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", str(texto or "")) if not unicodedata.combining(c)
+    ).casefold()
+
+
+def filtrar_cnaes(itens, termo, limit):
+    """CNAEs cujo codigo comeca pelo termo ou cuja descricao o contem.
+
+    Roda em memoria: sao pouco mais de mil codigos, ja carregados para
+    recompor as descricoes das empresas.
+    """
+    termo = str(termo or "").strip()
+    digitos = "".join(c for c in termo if c.isdigit())
+    so_digitos = bool(digitos) and not any(c.isalpha() for c in termo)
+    texto = _sem_acento(termo)
+    encontrados = []
+    for codigo, descricao in sorted(itens):
+        if not termo:
+            bate = True
+        elif so_digitos:
+            bate = codigo.startswith(digitos)
+        else:
+            bate = texto in _sem_acento(descricao)
+        if bate:
+            encontrados.append({"codigo": codigo, "descricao": descricao})
+            if len(encontrados) >= limit:
+                break
+    return encontrados
+
+
+@app.get("/cnaes")
+def cnaes(
+    q: str = Query("", description="inicio do codigo ou trecho da descricao"),
+    codigos: str | None = Query(None, description="devolve so estes codigos, separados por virgula"),
+    limit: int = Query(50, ge=1, le=2000),
+):
+    itens = [(codigo, descricao) for (tipo, codigo), descricao in dominios().items() if tipo == "cnae"]
+    pedidos = set(_cnaes(codigos))
+    if pedidos:
+        itens = [item for item in itens if item[0] in pedidos]
+    return {"cnaes": filtrar_cnaes(itens, q, limit)}
+
+
+@app.get("/municipios")
+def municipios(
+    uf: str = Query(..., min_length=2, max_length=2),
+    q: str = Query("", description="trecho do nome"),
+    limit: int = Query(500, ge=1, le=2000),
+):
+    """Municipios de uma UF com empresas na base, do mais populoso ao menos."""
+    parametros = {"uf": uf.strip().upper(), "limit": limit}
+    condicao = "uf = %(uf)s"
+    if q.strip():
+        condicao += " AND nome ILIKE %(nome)s"
+        parametros["nome"] = f"%{q.strip()}%"
+    try:
+        with pool.connection() as conn:
+            linhas = conn.execute(
+                f"SELECT uf, codigo, nome, empresas FROM municipio WHERE {condicao} "
+                f"ORDER BY empresas DESC, nome LIMIT %(limit)s",
+                parametros,
+            ).fetchall()
+    except UndefinedTable:
+        raise HTTPException(
+            status_code=503,
+            detail="tabela municipio ainda nao existe nesta carga; rode python -m app.derivar",
+        )
+    return {"uf": parametros["uf"], "municipios": linhas}
 
 
 class ConsultaLote(BaseModel):
