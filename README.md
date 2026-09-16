@@ -117,8 +117,8 @@ curl "http://localhost:8006/cnae/7112000?uf=GO&situacao=Ativa&limit=200"
 | `amostra` / `semente` | sorteio no conjunto todo, até 1000 |
 | `limit` / `offset` | paginação, até 1000 por página |
 
-O formato `resumo` traz o que basta para pareamento: CNPJ, razão social, CNAE com descrição,
-situação, data de início, porte, matriz ou filial, UF e município.
+O formato `resumo` traz o que basta para pareamento e para listar: CNPJ, razão social, CNAE com
+descrição, situação, data de início, porte, matriz ou filial, UF, município e capital social (número).
 
 #### Sortear em vez de paginar
 

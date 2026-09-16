@@ -25,6 +25,7 @@ CAMPOS_RESUMO = (
     "uf",
     "municipio",
     "codigo_municipio",
+    "capital_social",
 )
 
 TTL_DOMINIOS = 600
@@ -165,6 +166,7 @@ def montar_resumo(linha):
         "uf": _texto(linha["uf"]),
         "municipio": _texto(linha["municipio"]),
         "codigo_municipio": _texto(linha["codigo_municipio"]),
+        "capital_social": float(linha["capital_social"]) if linha["capital_social"] is not None else None,
     }
 
 
