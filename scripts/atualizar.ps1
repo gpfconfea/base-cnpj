@@ -2,33 +2,14 @@ $ErrorActionPreference = "Stop"
 
 Set-Location (Join-Path $PSScriptRoot "..")
 
-$limpar = $false
-$extras = @()
-
-if ($args.Count -gt 0 -and $args[0] -eq "--limpar") {
-    $limpar = $true
-    if ($args.Count -gt 1) {
-        $extras = $args[1..($args.Count - 1)]
-    }
-} else {
-    $extras = $args
-}
+# --limpar continua aceito para nao quebrar chamadas antigas, mas a limpeza agora e automatica.
+$extras = @($args | Where-Object { $_ -ne "--limpar" })
 
 Write-Host "== baixando e extraindo =="
-
-if ($limpar) {
-    docker compose --profile manual run --rm ingestor -m app.baixar --remover-zip @extras
-} else {
-    docker compose --profile manual run --rm ingestor -m app.baixar @extras
-}
+docker compose --profile manual run --rm ingestor -m app.baixar --remover-zip @extras
 
 Write-Host "== ingerindo =="
-
-if ($limpar) {
-    docker compose --profile manual run --rm ingestor -m app.ingerir --apagar
-} else {
-    docker compose --profile manual run --rm ingestor -m app.ingerir
-}
+docker compose --profile manual run --rm ingestor -m app.ingerir --apagar
 
 Write-Host "== estado =="
 

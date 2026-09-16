@@ -31,8 +31,11 @@ curl http://localhost:8006/health
 ## Carregar e atualizar a base
 
 ```bash
-./scripts/atualizar.sh --limpar
+./scripts/atualizar.sh
 ```
+
+O script baixa, extrai, ingere e limpa automaticamente o ZIP e os `.ndjson` ao final de uma carga bem-sucedida.
+O argumento `--limpar` continua aceito por compatibilidade, mas não é mais necessário.
 
 O script faz duas etapas, que também podem ser rodadas separadamente:
 

@@ -3,25 +3,17 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-LIMPAR=""
-if [ "${1:-}" == "--limpar" ]; then
-    LIMPAR="1"
-    shift
-fi
+# --limpar continua aceito para nao quebrar chamadas antigas, mas a limpeza agora e automatica.
+EXTRAS=()
+for arg in "$@"; do
+    [ "$arg" == "--limpar" ] || EXTRAS+=("$arg")
+done
 
 echo "== baixando e extraindo =="
-if [ -n "$LIMPAR" ]; then
-    docker compose --profile manual run --rm ingestor -m app.baixar --remover-zip "$@"
-else
-    docker compose --profile manual run --rm ingestor -m app.baixar "$@"
-fi
+docker compose --profile manual run --rm ingestor -m app.baixar --remover-zip ${EXTRAS[@]+"${EXTRAS[@]}"}
 
 echo "== ingerindo =="
-if [ -n "$LIMPAR" ]; then
-    docker compose --profile manual run --rm ingestor -m app.ingerir --apagar
-else
-    docker compose --profile manual run --rm ingestor -m app.ingerir
-fi
+docker compose --profile manual run --rm ingestor -m app.ingerir --apagar
 
 echo "== estado =="
 curl -s "http://localhost:${PORTA_API:-8006}/carga" || true
