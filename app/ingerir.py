@@ -61,11 +61,21 @@ def _trabalho(caminho):
     return carregar_arquivo(pathlib.Path(caminho))
 
 
+def _derrubar(conn, nome):
+    """DROP VIEW/TABLE IF EXISTS falha se o objeto existe com outro tipo, entao consulta o tipo antes."""
+    linha_ = conn.execute(
+        "SELECT relkind FROM pg_class WHERE oid = to_regclass(%s)", (nome,)
+    ).fetchone()
+    if linha_ is None:
+        return
+    tipo = "VIEW" if linha_[0] == "v" else "TABLE"
+    conn.execute(f"DROP {tipo} IF EXISTS {nome} CASCADE")
+
+
 def preparar_tabela(conn):
-    conn.execute("DROP VIEW IF EXISTS empresa CASCADE")
-    conn.execute("DROP TABLE IF EXISTS empresa_a CASCADE")
-    conn.execute("DROP TABLE IF EXISTS empresa_b CASCADE")
-    conn.execute("DROP TABLE IF EXISTS empresa CASCADE")
+    # empresa_a/empresa_b e a view sao restos de um esquema antigo de troca; hoje empresa e uma tabela
+    for nome in ("empresa", "empresa_a", "empresa_b"):
+        _derrubar(conn, nome)
     conn.execute(DDL)
     conn.commit()
 
