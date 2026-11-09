@@ -86,6 +86,31 @@ CREATE TABLE empresa (
 )
 """
 
+FUNCAO_NOME_CHAVE = """
+CREATE OR REPLACE FUNCTION nome_chave(texto text) RETURNS text
+LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$
+SELECT nullif(btrim(regexp_replace(regexp_replace(
+    upper(translate(texto, 'áàâãäåÁÀÂÃÄÅéèêëÉÈÊËíìîïÍÌÎÏóòôõöÓÒÔÕÖúùûüÚÙÛÜçÇñÑýÿÝ', 'AAAAAAAAAAAAEEEEEEEEIIIIIIIIOOOOOOOOOOUUUUUUUUCCNNYYY')),
+    '[.'']', '', 'g'), '[^A-Z0-9]+', ' ', 'g')), '')
+$$
+"""
+
+PREPARO_BUSCA_NOME = ("CREATE EXTENSION IF NOT EXISTS pg_trgm", FUNCAO_NOME_CHAVE)
+
+INDICES_BUSCA_NOME = (
+    ("empresa_razao_trgm_idx", "USING gin (razao_social gin_trgm_ops) WHERE situacao_cadastral = 'Ativa'"),
+    ("empresa_fantasia_trgm_idx", "USING gin (nome_fantasia gin_trgm_ops) WHERE situacao_cadastral = 'Ativa'"),
+    ("empresa_razao_chave_idx", "(nome_chave(razao_social)) WHERE situacao_cadastral = 'Ativa'"),
+)
+
+
+def comandos_concorrentes():
+    return PREPARO_BUSCA_NOME, [
+        (nome, f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {nome} ON empresa {definicao}")
+        for nome, definicao in INDICES_BUSCA_NOME
+    ]
+
+
 INDICES = (
     "ALTER TABLE empresa ADD CONSTRAINT empresa_pkey PRIMARY KEY (cnpj)",
     # um indice so para os tres recortes que /cnae/{codigo} aceita: pela regra da
@@ -95,6 +120,8 @@ INDICES = (
     # GIN porque cnaes_secundarios e text[]; so serve para o operador de
     # continencia (@>), nao para o "= ANY(...)" que a consulta usava antes
     "CREATE INDEX empresa_cnae_sec_idx ON empresa USING gin (cnaes_secundarios)",
+    *PREPARO_BUSCA_NOME,
+    *(f"CREATE INDEX {nome} ON empresa {definicao}" for nome, definicao in INDICES_BUSCA_NOME),
 )
 
 # Tabelas derivadas de `empresa`, refeitas a cada carga depois dos indices.
