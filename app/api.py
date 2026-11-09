@@ -12,6 +12,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from app import config
+from app.schema import normalizar_nome
 
 CAMPOS_RESUMO = (
     "cnpj",
@@ -549,6 +550,153 @@ def por_lote(consulta: ConsultaLote):
         "empresas": encontrados,
         "nao_encontrados": sorted(limpos - achados),
     }
+
+
+NATUREZAS_PESSOA_FISICA = (
+    "Empresário (Individual)",
+    "Produtor Rural (Pessoa Física)",
+    "Candidato a Cargo Político Eletivo",
+)
+
+CAMPOS_NOME = (
+    "cnpj",
+    "razao_social",
+    "nome_fantasia",
+    "natureza_juridica",
+    "situacao_cadastral",
+    "matriz_filial",
+    "uf",
+    "municipio",
+    "codigo_municipio",
+    "cnae_principal",
+)
+
+FILTRO_PESSOA_FISICA = "coalesce(natureza_juridica, '') <> ALL(%(naturezas_pf)s) AND opcao_mei IS DISTINCT FROM 'S'"
+
+
+def _like_literal(texto):
+    return texto.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def montar_filtro_nome(q, modo, uf=None, municipio=None, situacao="Ativa", excluir_pessoa_fisica=False):
+    termo = normalizar_nome(q) or ""
+    if len("".join(c for c in termo if c.isalnum())) < 3:
+        raise ValueError("informe ao menos 3 letras ou numeros")
+    if (situacao or "").strip().casefold() != "ativa":
+        raise ValueError("a busca por nome alcanca so empresas ativas")
+    uf = (uf or "").strip().upper()[:2]
+    if modo != "exato" and not uf:
+        raise ValueError("sem uf, so o modo exato e aceito")
+
+    condicoes = ["situacao_cadastral = 'Ativa'"]
+    parametros = {}
+    if modo == "exato":
+        condicoes.append("nome_chave(razao_social) = nome_chave(%(termo)s)")
+        parametros["termo"] = termo
+    else:
+        padrao = _like_literal(termo) + "%"
+        parametros["padrao"] = padrao if modo == "inicio" else "%" + padrao
+        condicoes.append("(razao_social LIKE %(padrao)s OR nome_fantasia LIKE %(padrao)s)")
+    if uf:
+        condicoes.append("uf = %(uf)s")
+        parametros["uf"] = uf
+    if municipio and municipio.strip():
+        condicoes.append("codigo_municipio = %(municipio)s")
+        parametros["municipio"] = municipio.strip()
+    if excluir_pessoa_fisica:
+        condicoes.append(FILTRO_PESSOA_FISICA)
+        parametros["naturezas_pf"] = list(NATUREZAS_PESSOA_FISICA)
+    return " AND ".join(condicoes), parametros
+
+
+def montar_nome(linha):
+    empresa = {campo: _texto(linha[campo]) for campo in CAMPOS_NOME}
+    empresa["matriz"] = linha["matriz_filial"] == "Matriz"
+    return empresa
+
+
+def agrupar_candidatos(linhas):
+    grupos = {}
+    for linha in linhas:
+        grupo = grupos.setdefault(
+            linha["ordem"],
+            {"nome": linha["nome"], "chave": linha["chave"], "total": linha["total"] or 0, "candidatos": []},
+        )
+        if linha["cnpj"]:
+            grupo["candidatos"].append(montar_nome(linha))
+    return [grupos[ordem] for ordem in sorted(grupos)]
+
+
+@app.get("/nome")
+def por_nome(
+    q: str = Query(..., description="nome ou trecho, ao menos 3 caracteres"),
+    uf: str | None = None,
+    municipio: str | None = Query(None, description="codigo do municipio na Receita"),
+    situacao: str = Query("Ativa", description="so Ativa"),
+    modo: str = Query("contem", pattern="^(contem|inicio|exato)$"),
+    excluir_pessoa_fisica: bool = False,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    try:
+        filtro, parametros = montar_filtro_nome(q, modo, uf, municipio, situacao, excluir_pessoa_fisica)
+    except ValueError as erro:
+        raise HTTPException(status_code=400, detail=str(erro))
+    campos = ", ".join(CAMPOS_NOME)
+    with pool.connection() as conn:
+        linhas = conn.execute(
+            f"SELECT {campos} FROM empresa WHERE {filtro} ORDER BY razao_social, cnpj "
+            "LIMIT %(limit)s OFFSET %(offset)s",
+            dict(parametros, limit=limit, offset=offset),
+        ).fetchall()
+        total = conn.execute(f"SELECT count(*) AS total FROM empresa WHERE {filtro}", parametros).fetchone()["total"]
+    return {
+        "q": q,
+        "modo": modo,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "empresas": [montar_nome(linha) for linha in linhas],
+    }
+
+
+class ConsultaNomes(BaseModel):
+    nomes: list[str] = Field(min_length=1, max_length=1000)
+    uf: str | None = None
+    excluir_pessoa_fisica: bool = True
+    max_candidatos: int = Field(20, ge=1, le=100)
+
+
+@app.post("/nomes")
+def por_nomes(consulta: ConsultaNomes):
+    parametros = {"nomes": consulta.nomes, "max": consulta.max_candidatos}
+    extra = ""
+    if consulta.uf and consulta.uf.strip():
+        extra += " AND uf = %(uf)s"
+        parametros["uf"] = consulta.uf.strip().upper()[:2]
+    if consulta.excluir_pessoa_fisica:
+        extra += " AND " + FILTRO_PESSOA_FISICA
+        parametros["naturezas_pf"] = list(NATUREZAS_PESSOA_FISICA)
+    campos = ", ".join(f"c.{campo}" for campo in CAMPOS_NOME)
+    sql = f"""
+        WITH entrada AS (
+            SELECT t.nome, t.ordem, nome_chave(t.nome) AS chave
+            FROM unnest(%(nomes)s::text[]) WITH ORDINALITY AS t(nome, ordem)
+        )
+        SELECT e.ordem, e.nome, e.chave, c.total, {campos}
+        FROM entrada e
+        LEFT JOIN LATERAL (
+            SELECT {", ".join(CAMPOS_NOME)}, count(*) OVER () AS total
+            FROM empresa
+            WHERE situacao_cadastral = 'Ativa' AND nome_chave(razao_social) = e.chave{extra}
+            ORDER BY (matriz_filial = 'Matriz') DESC, cnpj
+            LIMIT %(max)s
+        ) c ON true
+        ORDER BY e.ordem, (c.matriz_filial = 'Matriz') DESC, c.cnpj
+    """
+    with pool.connection() as conn:
+        linhas = conn.execute(sql, parametros).fetchall()
+    return {"nomes": agrupar_candidatos(linhas)}
 
 
 @app.get("/{cnpj}")

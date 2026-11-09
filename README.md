@@ -80,6 +80,8 @@ O histórico de cargas fica na tabela `carga` e em `GET /carga`.
 | `GET /cnaes` | códigos CNAE com descrição, por início do código ou trecho do texto |
 | `GET /municipios` | municípios de uma UF com empresas na base |
 | `POST /cnpjs` | consulta em lote, até 1000 CNPJs |
+| `GET /nome` | empresas ativas por nome, por trecho, início ou casamento exato |
+| `POST /nomes` | casamento exato em lote, até 1000 nomes, com os candidatos de cada um |
 
 Sem token e sem limite de requisição, como combinado. A API é de leitura: nenhuma rota escreve no
 banco.
@@ -202,6 +204,54 @@ curl -X POST http://localhost:8006/cnpjs \
 
 Devolve os encontrados e a lista de `nao_encontrados`. Existe porque enriquecer milhares de CNPJs
 uma requisição por vez levaria minutos.
+
+### `GET /nome`
+
+```bash
+curl "http://localhost:8006/nome?q=engenharia&uf=GO&modo=contem&limit=50"
+curl "http://localhost:8006/nome?q=M.A.%20Engenharia%20Ltda&modo=exato&excluir_pessoa_fisica=true"
+```
+
+| Parâmetro | Efeito |
+| --- | --- |
+| `q` | nome ou trecho, com ao menos 3 letras ou números |
+| `modo` | `contem` (padrão), `inicio` ou `exato` |
+| `uf` | obrigatório em `contem` e `inicio` |
+| `municipio` | código do município na Receita |
+| `situacao` | só `Ativa` (padrão); outro valor responde `400` |
+| `excluir_pessoa_fisica` | `true` tira empresário individual, produtor rural pessoa física, candidato a cargo político e MEI |
+| `limit` / `offset` | paginação, até 500 por página |
+
+`contem` e `inicio` procuram o termo na razão social e no nome fantasia, já em maiúsculas e sem
+acento, com a pontuação mantida. `exato` compara só a razão social pela chave de casamento: maiúsculas,
+sem acento, ponto e apóstrofo removidos, os demais sinais viram espaço e os espaços repetidos se juntam.
+Assim `M.A. Engenharia Ltda.` e `MA ENGENHARIA LTDA` casam; `M. A. ENGENHARIA` vira `M A ENGENHARIA` e
+não casa com os dois.
+
+A resposta traz `total`, para paginar, e uma lista enxuta: `cnpj`, `razao_social`, `nome_fantasia`,
+`natureza_juridica`, `situacao_cadastral`, `matriz_filial`, `matriz` (booleano), `uf`, `municipio`,
+`codigo_municipio` e `cnae_principal`. Sem QSA, telefone nem e-mail; o restante sai de `GET /{cnpj}`.
+
+Os limites existem porque a busca só é rápida dentro dos índices, que cobrem apenas empresas ativas.
+Trecho de nome sem UF alcança milhões de linhas e por isso só o casamento exato dispensa a UF.
+
+### `POST /nomes`
+
+```bash
+curl -X POST http://localhost:8006/nomes   -H 'Content-Type: application/json'   -d '{"nomes": ["M.A. Engenharia Ltda", "Construtora Ávila S.A."], "uf": "GO"}'
+```
+
+| Campo | Efeito |
+| --- | --- |
+| `nomes` | até 1000 nomes |
+| `uf` | opcional, restringe os candidatos à UF |
+| `excluir_pessoa_fisica` | ligado por padrão, mesmo critério de `GET /nome` |
+| `max_candidatos` | quantos candidatos devolver por nome, padrão 20, até 100 |
+
+Para cada nome, na ordem enviada, devolve `nome`, a `chave` de casamento calculada pelo banco,
+`total` de candidatos ativos com essa chave e `candidatos`, matrizes primeiro, no mesmo formato
+enxuto de `GET /nome`. `total` maior que `max_candidatos` indica que a lista foi cortada; `total`
+zero, que nenhuma empresa ativa casou.
 
 ## Modelo de dados
 
@@ -362,6 +412,9 @@ Chave primária em `(uf, codigo)`.
 | `empresa_pkey` | `empresa` | `PRIMARY KEY (cnpj)` | ~2,2 GB |
 | `empresa_cnae_uf_municipio_idx` | `empresa` | `(cnae_principal, uf, codigo_municipio)` | ~700 MB |
 | `empresa_cnae_sec_idx` | `empresa` | `GIN (cnaes_secundarios)` | ~600 MB |
+| `empresa_razao_trgm_idx` | `empresa` | `GIN (razao_social gin_trgm_ops)`, só ativas | ~2,8 GB (estimado) |
+| `empresa_fantasia_trgm_idx` | `empresa` | `GIN (nome_fantasia gin_trgm_ops)`, só ativas | ~0,5 GB (estimado) |
+| `empresa_razao_chave_idx` | `empresa` | `(nome_chave(razao_social))`, só ativas | ~1,5 GB (estimado) |
 | `dominio_pkey` | `dominio` | `PRIMARY KEY (tipo, codigo)` | KB |
 | `carga_pkey` | `carga` | `PRIMARY KEY (id)` | KB |
 | `carga_concluida_idx` | `carga` | `(concluida_em DESC NULLS LAST)` | KB |
@@ -370,6 +423,33 @@ Chave primária em `(uf, codigo)`.
 Tamanhos para as ~72,7 milhões de linhas da carga de setembro de 2026. Os índices de `empresa` são
 criados **depois** do `COPY`, nunca antes: manter btree durante a carga trocaria escrita sequencial
 por escrita aleatória e multiplicaria o tempo de ingestão.
+
+Os três últimos atendem `GET /nome` e `POST /nomes`. São parciais em `situacao_cadastral = 'Ativa'`,
+cerca de 29 milhões das 75 milhões de linhas, e a consulta repete essa condição literalmente para o
+planejador poder usá-los. Dependem da extensão `pg_trgm` e da função `nome_chave`, que a carga cria
+antes deles. `nome_chave` tira acento e põe em maiúsculas por conta própria, então o casamento vale
+igual numa tabela carregada antes da normalização da razão social na ingestão.
+
+#### Criar os índices de nome numa base já carregada
+
+Temporário, até a próxima carga, que já os cria: `scripts/temp_criar_indices_nome.py` instala
+`pg_trgm`, cria `nome_chave` e os três índices com `CREATE INDEX CONCURRENTLY IF NOT EXISTS`, sem
+bloquear a API. Pode rodar de novo: o que já existe é pulado. Antes de criar, mostra o tamanho
+estimado e o espaço livre no servidor do banco, e para se o livre não chegar ao dobro do estimado. No
+fim, mostra o tamanho real e o tempo de cada índice.
+
+```bash
+# fora do Docker, com as credenciais do .env
+python scripts/temp_criar_indices_nome.py --host 192.168.1.18 --porta 5436
+
+# dentro do Docker
+docker compose --profile manual run --rm -v ./app:/app/app -v ./scripts:/app/scripts   ingestor scripts/temp_criar_indices_nome.py
+```
+
+`--estimar` só mostra a estimativa. O espaço livre é medido com `df` no servidor, via
+`COPY ... FROM PROGRAM`, o que exige superusuário; sem isso, meça na VM e passe `--livre-gb`. Se uma
+tentativa cair no meio, o índice fica inválido e o script para, pedindo `DROP INDEX CONCURRENTLY`
+antes de tentar de novo.
 
 Para conferir o que existe de fato no banco:
 
@@ -414,7 +494,8 @@ pytest
 
 Cobrem a conversão de cada registro do `.ndjson` em linha do banco, que é onde a base costuma
 morder: data vazia ou `0000-00-00`, capital social em formato brasileiro, string vazia que precisa
-virar nulo, CNPJ curto e descrições que vão para `dominio`.
+virar nulo, CNPJ curto e descrições que vão para `dominio`. Razão social e nome fantasia saem em
+maiúsculas, sem acento e sem espaços sobrando, com a pontuação mantida.
 
 ## Usar a partir do FTNF
 
