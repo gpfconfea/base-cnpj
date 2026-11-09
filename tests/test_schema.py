@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.schema import COLUNAS, linha
+from app.schema import COLUNAS, linha, normalizar_nome
 
 REGISTRO = {
     "cnpj": "99017782000139",
@@ -150,3 +150,38 @@ def test_registro_sem_cnpj_e_descartado():
     tupla, dominios = linha({**REGISTRO, "cnpj": ""})
     assert tupla is None
     assert dominios == ()
+
+
+@pytest.mark.parametrize(
+    "bruto, esperado",
+    [
+        ("Acme Comercio Ltda", "ACME COMERCIO LTDA"),
+        ("JOSÉ DA CONCEIÇÃO", "JOSE DA CONCEICAO"),
+        ("  M.A.   LTDA  ", "M.A. LTDA"),
+        ("A & B - SERVIÇOS/ENG. (FILIAL)", "A & B - SERVICOS/ENG. (FILIAL)"),
+        ("Nº 1\tLTDA", "Nº 1 LTDA"),
+        ("", None),
+        ("   ", None),
+        (None, None),
+    ],
+)
+def test_normalizar_nome(bruto, esperado):
+    assert normalizar_nome(bruto) == esperado
+
+
+def test_normalizar_nome_e_idempotente():
+    uma_vez = normalizar_nome("  José   d'Ávila  M.E. ")
+    assert normalizar_nome(uma_vez) == uma_vez == "JOSE D'AVILA M.E."
+
+
+def test_razao_social_e_nome_fantasia_saem_normalizados():
+    tupla, _ = linha({**REGISTRO, "razao_social": "Construtora  Ávila S.A.", "nome_fantasia": " ávila "})
+    valores = dict(zip(COLUNAS, tupla))
+    assert valores["razao_social"] == "CONSTRUTORA AVILA S.A."
+    assert valores["nome_fantasia"] == "AVILA"
+
+
+def test_demais_textos_nao_sao_normalizados():
+    tupla, _ = linha({**REGISTRO, "logradouro": "Rua  São João"})
+    valores = dict(zip(COLUNAS, tupla))
+    assert valores["logradouro"] == "Rua  São João"

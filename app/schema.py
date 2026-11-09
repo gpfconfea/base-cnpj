@@ -1,3 +1,4 @@
+import unicodedata
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
@@ -120,6 +121,15 @@ def _texto(valor):
     return valor or None
 
 
+def normalizar_nome(valor):
+    valor = _texto(valor)
+    if not valor:
+        return None
+    decomposto = unicodedata.normalize("NFD", valor.upper())
+    sem_acento = "".join(c for c in decomposto if not unicodedata.combining(c))
+    return " ".join(unicodedata.normalize("NFC", sem_acento).split()) or None
+
+
 def _sem_nulo(valor):
     """Tira o byte 0x00 de dentro de telefones e QSA, recursivamente.
 
@@ -216,8 +226,8 @@ def linha(registro):
 
     tupla = (
         cnpj,
-        _texto(registro.get("razao_social")),
-        _texto(registro.get("nome_fantasia")),
+        normalizar_nome(registro.get("razao_social")),
+        normalizar_nome(registro.get("nome_fantasia")),
         _texto(registro.get("situacao_cadastral")),
         _data(registro.get("data_situacao_cadastral")),
         motivo,
