@@ -7,7 +7,7 @@ from decimal import Decimal
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from psycopg.errors import UndefinedTable
+from psycopg.errors import QueryCanceled, UndefinedTable
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
@@ -571,6 +571,10 @@ CAMPOS_NOME = (
     "cnae_principal",
 )
 
+MINIMO_NACIONAL = 5
+LIMITE_NACIONAL = 50
+TEMPO_LIMITE_NACIONAL = "8s"
+
 FILTRO_PESSOA_FISICA = "coalesce(natureza_juridica, '') <> ALL(%(naturezas_pf)s) AND opcao_mei IS DISTINCT FROM 'S'"
 
 
@@ -578,15 +582,18 @@ def _like_literal(texto):
     return texto.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def busca_nacional(modo, uf):
+    return modo != "exato" and not (uf or "").strip()
+
+
 def montar_filtro_nome(q, modo, uf=None, municipio=None, situacao="Ativa", excluir_pessoa_fisica=False):
     termo = normalizar_nome(q) or ""
-    if len("".join(c for c in termo if c.isalnum())) < 3:
-        raise ValueError("informe ao menos 3 letras ou numeros")
+    minimo = MINIMO_NACIONAL if busca_nacional(modo, uf) else 3
+    if len("".join(c for c in termo if c.isalnum())) < minimo:
+        raise ValueError(f"informe ao menos {minimo} letras ou numeros")
     if (situacao or "").strip().casefold() != "ativa":
         raise ValueError("a busca por nome alcanca so empresas ativas")
     uf = (uf or "").strip().upper()[:2]
-    if modo != "exato" and not uf:
-        raise ValueError("sem uf, so o modo exato e aceito")
 
     condicoes = ["situacao_cadastral = 'Ativa'"]
     parametros = {}
@@ -629,7 +636,7 @@ def agrupar_candidatos(linhas):
 
 @app.get("/nome")
 def por_nome(
-    q: str = Query(..., description="nome ou trecho, ao menos 3 caracteres"),
+    q: str = Query(..., description="nome ou trecho: ao menos 3 caracteres, ou 5 em trecho ou inicio sem uf"),
     uf: str | None = None,
     municipio: str | None = Query(None, description="codigo do municipio na Receita"),
     situacao: str = Query("Ativa", description="so Ativa"),
@@ -638,25 +645,41 @@ def por_nome(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
+    nacional = busca_nacional(modo, uf)
     try:
         filtro, parametros = montar_filtro_nome(q, modo, uf, municipio, situacao, excluir_pessoa_fisica)
     except ValueError as erro:
         raise HTTPException(status_code=400, detail=str(erro))
+    if nacional and limit > LIMITE_NACIONAL:
+        raise HTTPException(status_code=400, detail=f"sem uf, limit vai ate {LIMITE_NACIONAL}")
     campos = ", ".join(CAMPOS_NOME)
-    with pool.connection() as conn:
-        linhas = conn.execute(
-            f"SELECT {campos} FROM empresa WHERE {filtro} ORDER BY razao_social, cnpj "
-            "LIMIT %(limit)s OFFSET %(offset)s",
-            dict(parametros, limit=limit, offset=offset),
-        ).fetchall()
-        total = conn.execute(f"SELECT count(*) AS total FROM empresa WHERE {filtro}", parametros).fetchone()["total"]
+    total = None
+    try:
+        with pool.connection() as conn:
+            if nacional:
+                conn.execute(f"SET LOCAL statement_timeout = '{TEMPO_LIMITE_NACIONAL}'")
+            linhas = conn.execute(
+                f"SELECT {campos} FROM empresa WHERE {filtro} ORDER BY razao_social, cnpj "
+                "LIMIT %(limit)s OFFSET %(offset)s",
+                dict(parametros, limit=limit + 1, offset=offset),
+            ).fetchall()
+            if not nacional:
+                total = conn.execute(
+                    f"SELECT count(*) AS total FROM empresa WHERE {filtro}", parametros
+                ).fetchone()["total"]
+    except QueryCanceled:
+        raise HTTPException(
+            status_code=504,
+            detail="busca sem uf demorou demais; use um trecho mais especifico ou informe a uf",
+        )
     return {
         "q": q,
         "modo": modo,
         "total": total,
+        "mais": len(linhas) > limit,
         "limit": limit,
         "offset": offset,
-        "empresas": [montar_nome(linha) for linha in linhas],
+        "empresas": [montar_nome(linha) for linha in linhas[:limit]],
     }
 
 

@@ -1,8 +1,14 @@
+from contextlib import contextmanager
+
 import pytest
 from fastapi.testclient import TestClient
+from psycopg.errors import QueryCanceled
 
+from app import api
 from app.api import (
     NATUREZAS_PESSOA_FISICA,
+    TEMPO_LIMITE_NACIONAL,
+    busca_nacional,
     agrupar_candidatos,
     app,
     montar_filtro_nome,
@@ -79,8 +85,8 @@ def test_sem_excluir_pessoa_fisica_nao_ha_filtro_de_natureza():
     [
         ("ab", "exato", None, "Ativa"),
         ("  a.b  ", "contem", "GO", "Ativa"),
-        ("engenharia", "contem", None, "Ativa"),
-        ("engenharia", "inicio", "", "Ativa"),
+        ("enge", "contem", None, "Ativa"),
+        ("e.n.g.e", "inicio", "", "Ativa"),
         ("engenharia", "exato", None, "Baixada"),
     ],
 )
@@ -130,11 +136,135 @@ def test_get_nome_responde_400_para_termo_curto():
     assert resposta.status_code == 400
 
 
-def test_get_nome_sem_uf_so_aceita_exato():
-    resposta = TestClient(app).get("/nome", params={"q": "engenharia", "modo": "contem"})
+def test_sem_uf_trecho_de_cinco_caracteres_vale_no_pais_todo():
+    filtro, parametros = montar_filtro_nome("engen", "contem")
+
+    assert "uf" not in parametros
+    assert parametros["padrao"] == "%ENGEN%"
+    assert "situacao_cadastral = 'Ativa'" in filtro
+
+
+def test_com_uf_trecho_de_tres_caracteres_continua_valendo():
+    _, parametros = montar_filtro_nome("eng", "contem", uf="GO")
+
+    assert parametros["padrao"] == "%ENG%"
+
+
+def test_busca_nacional_e_so_trecho_ou_inicio_sem_uf():
+    assert busca_nacional("contem", None)
+    assert busca_nacional("inicio", " ")
+    assert not busca_nacional("exato", None)
+    assert not busca_nacional("contem", "GO")
+
+
+class _Resultado:
+    def __init__(self, linhas):
+        self.linhas = linhas
+
+    def fetchall(self):
+        return self.linhas
+
+    def fetchone(self):
+        return self.linhas[0]
+
+
+class _Conexao:
+    def __init__(self, linhas, erro=None):
+        self.linhas = linhas
+        self.erro = erro
+        self.comandos = []
+
+    def execute(self, sql, parametros=None):
+        self.comandos.append((sql, parametros))
+        if sql.startswith("SELECT count"):
+            return _Resultado([{"total": len(self.linhas)}])
+        if sql.startswith("SELECT") and self.erro:
+            raise self.erro
+        if sql.startswith("SELECT"):
+            limite = parametros["limit"]
+            return _Resultado(self.linhas[:limite])
+        return _Resultado([])
+
+
+class _Pool:
+    def __init__(self, conexao):
+        self.conexao = conexao
+
+    @contextmanager
+    def connection(self):
+        yield self.conexao
+
+
+def _pedir(monkeypatch, conexao, **params):
+    monkeypatch.setattr(api, "pool", _Pool(conexao))
+    return TestClient(app).get("/nome", params=params)
+
+
+def _linhas(quantidade):
+    return [{**LINHA, "cnpj": f"{n:014d}"} for n in range(quantidade)]
+
+
+def test_sem_uf_nao_conta_e_avisa_que_ha_mais(monkeypatch):
+    conexao = _Conexao(_linhas(4))
+
+    corpo = _pedir(monkeypatch, conexao, q="engenharia", limit=3).json()
+
+    assert corpo["total"] is None
+    assert corpo["mais"] is True
+    assert len(corpo["empresas"]) == 3
+    assert not [sql for sql, _ in conexao.comandos if sql.startswith("SELECT count")]
+
+
+def test_sem_uf_na_ultima_pagina_nao_ha_mais(monkeypatch):
+    corpo = _pedir(monkeypatch, _Conexao(_linhas(3)), q="engenharia", limit=3).json()
+
+    assert corpo["mais"] is False
+    assert len(corpo["empresas"]) == 3
+
+
+def test_sem_uf_a_consulta_tem_tempo_limite(monkeypatch):
+    conexao = _Conexao(_linhas(1))
+
+    _pedir(monkeypatch, conexao, q="engenharia")
+
+    assert conexao.comandos[0][0] == f"SET LOCAL statement_timeout = '{TEMPO_LIMITE_NACIONAL}'"
+
+
+def test_sem_uf_tempo_estourado_vira_504(monkeypatch):
+    resposta = _pedir(monkeypatch, _Conexao([], erro=QueryCanceled()), q="engenharia")
+
+    assert resposta.status_code == 504
+    assert "uf" in resposta.json()["detail"]
+
+
+def test_sem_uf_limite_passa_de_50_e_recusado(monkeypatch):
+    resposta = _pedir(monkeypatch, _Conexao([]), q="engenharia", limit=51)
 
     assert resposta.status_code == 400
-    assert "uf" in resposta.json()["detail"]
+    assert "50" in resposta.json()["detail"]
+
+
+def test_sem_uf_termo_de_quatro_caracteres_e_recusado(monkeypatch):
+    resposta = _pedir(monkeypatch, _Conexao([]), q="enge")
+
+    assert resposta.status_code == 400
+
+
+def test_com_uf_continua_contando_sem_tempo_limite(monkeypatch):
+    conexao = _Conexao(_linhas(4))
+
+    corpo = _pedir(monkeypatch, conexao, q="eng", uf="GO", limit=3).json()
+
+    assert corpo["total"] == 4
+    assert corpo["mais"] is True
+    assert not [sql for sql, _ in conexao.comandos if "statement_timeout" in sql]
+
+
+def test_com_uf_aceita_limite_acima_de_50(monkeypatch):
+    resposta = _pedir(monkeypatch, _Conexao(_linhas(1)), q="eng", uf="GO", limit=200)
+
+    assert resposta.status_code == 200
+    assert resposta.json()["mais"] is False
 
 
 def test_get_nome_recusa_modo_desconhecido():

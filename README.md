@@ -209,18 +209,19 @@ uma requisição por vez levaria minutos.
 
 ```bash
 curl "http://localhost:8006/nome?q=engenharia&uf=GO&modo=contem&limit=50"
+curl "http://localhost:8006/nome?q=engenharia%20civil&modo=inicio&limit=20"
 curl "http://localhost:8006/nome?q=M.A.%20Engenharia%20Ltda&modo=exato&excluir_pessoa_fisica=true"
 ```
 
 | Parâmetro | Efeito |
 | --- | --- |
-| `q` | nome ou trecho, com ao menos 3 letras ou números |
+| `q` | nome ou trecho, com ao menos 3 letras ou números; 5 em `contem` e `inicio` sem `uf` |
 | `modo` | `contem` (padrão), `inicio` ou `exato` |
-| `uf` | obrigatório em `contem` e `inicio` |
+| `uf` | opcional; sem ela, a busca vale para o país todo, com os cuidados abaixo |
 | `municipio` | código do município na Receita |
 | `situacao` | só `Ativa` (padrão); outro valor responde `400` |
 | `excluir_pessoa_fisica` | `true` tira empresário individual, produtor rural pessoa física, candidato a cargo político e MEI |
-| `limit` / `offset` | paginação, até 500 por página |
+| `limit` / `offset` | paginação, até 500 por página; 50 em `contem` e `inicio` sem `uf` |
 
 `contem` e `inicio` procuram o termo na razão social e no nome fantasia, já em maiúsculas e sem
 acento, com a pontuação mantida. `exato` compara só a razão social pela chave de casamento: maiúsculas,
@@ -228,17 +229,24 @@ sem acento, ponto e apóstrofo removidos, os demais sinais viram espaço e os es
 Assim `M.A. Engenharia Ltda.` e `MA ENGENHARIA LTDA` casam; `M. A. ENGENHARIA` vira `M A ENGENHARIA` e
 não casa com os dois.
 
-A resposta traz `total`, para paginar, e uma lista enxuta: `cnpj`, `razao_social`, `nome_fantasia`,
+A resposta traz `total`, `mais` (se há outra página) e uma lista enxuta: `cnpj`, `razao_social`, `nome_fantasia`,
 `natureza_juridica`, `situacao_cadastral`, `matriz_filial`, `matriz` (booleano), `uf`, `municipio`,
 `codigo_municipio` e `cnae_principal`. Sem QSA, telefone nem e-mail; o restante sai de `GET /{cnpj}`.
 
 Os limites existem porque a busca só é rápida dentro dos índices, que cobrem apenas empresas ativas.
-Trecho de nome sem UF alcança milhões de linhas e por isso só o casamento exato dispensa a UF.
+
+`contem` e `inicio` sem `uf` usam os mesmos índices de trigramas, que cobrem o país, mas um trecho
+comum alcança muitas linhas. Por isso, só nesse caso: o termo precisa de 5 letras ou números, o
+`limit` vai até 50, `total` volta `null` (contar tudo custaria mais que a busca) e `mais` diz se há
+outra página. A consulta tem 8 segundos; se estourar, a resposta é `504`, e o caminho é um trecho
+mais específico ou a `uf`. Com `uf`, e no modo `exato`, `total` continua contado.
 
 ### `POST /nomes`
 
 ```bash
-curl -X POST http://localhost:8006/nomes   -H 'Content-Type: application/json'   -d '{"nomes": ["M.A. Engenharia Ltda", "Construtora Ávila S.A."], "uf": "GO"}'
+curl -X POST http://localhost:8006/nomes \
+  -H 'Content-Type: application/json' \
+  -d '{"nomes": ["M.A. Engenharia Ltda", "Construtora Ávila S.A."], "uf": "GO"}'
 ```
 
 | Campo | Efeito |
@@ -443,7 +451,8 @@ fim, mostra o tamanho real e o tempo de cada índice.
 python scripts/temp_criar_indices_nome.py --host 192.168.1.18 --porta 5436
 
 # dentro do Docker
-docker compose --profile manual run --rm -v ./app:/app/app -v ./scripts:/app/scripts   ingestor scripts/temp_criar_indices_nome.py
+docker compose --profile manual run --rm -v ./app:/app/app -v ./scripts:/app/scripts \
+  ingestor scripts/temp_criar_indices_nome.py
 ```
 
 `--estimar` só mostra a estimativa. O espaço livre é medido com `df` no servidor, via
