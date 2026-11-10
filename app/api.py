@@ -630,7 +630,7 @@ def agrupar_candidatos(linhas):
             {"nome": linha["nome"], "chave": linha["chave"], "total": linha["total"] or 0, "candidatos": []},
         )
         if linha["cnpj"]:
-            grupo["candidatos"].append(montar_nome(linha))
+            grupo["candidatos"].append({**montar_nome(linha), "casou_por": linha["casou_por"]})
     return [grupos[ordem] for ordem in sorted(grupos)]
 
 
@@ -690,6 +690,50 @@ class ConsultaNomes(BaseModel):
     max_candidatos: int = Field(20, ge=1, le=100)
 
 
+INDICE_CHAVE_FANTASIA = "empresa_fantasia_chave_idx"
+
+CHAVE_FANTASIA_PRONTA = (
+    "SELECT coalesce(bool_or(indisvalid AND indisready), false) AS pronto "
+    "FROM pg_index WHERE indexrelid = to_regclass(%s)"
+)
+
+
+def sql_nomes(extra, por_fantasia):
+    campos = ", ".join(CAMPOS_NOME)
+    ramos = [f"SELECT {campos} FROM empresa WHERE situacao_cadastral = 'Ativa' AND nome_chave(razao_social) = e.chave{extra}"]
+    if por_fantasia:
+        ramos.append(
+            f"SELECT {campos} FROM empresa WHERE situacao_cadastral = 'Ativa' AND nome_chave(nome_fantasia) = e.chave{extra}"
+        )
+    externos = ", ".join(f"c.{campo}" for campo in CAMPOS_NOME)
+    uniao = "\n                UNION\n                ".join(ramos)
+    return f"""
+        WITH entrada AS (
+            SELECT t.nome, t.ordem, nome_chave(t.nome) AS chave
+            FROM unnest(%(nomes)s::text[]) WITH ORDINALITY AS t(nome, ordem)
+        )
+        SELECT e.ordem, e.nome, e.chave, c.total, c.casou_por, {externos}
+        FROM entrada e
+        LEFT JOIN LATERAL (
+            SELECT m.*, count(*) OVER () AS total
+            FROM (
+                SELECT u.*,
+                       CASE
+                           WHEN nome_chave(u.razao_social) = e.chave AND nome_chave(u.nome_fantasia) = e.chave THEN 'ambos'
+                           WHEN nome_chave(u.razao_social) = e.chave THEN 'razao_social'
+                           ELSE 'nome_fantasia'
+                       END AS casou_por
+                FROM (
+                {uniao}
+                ) u
+            ) m
+            ORDER BY (m.casou_por = 'nome_fantasia'), (m.matriz_filial = 'Matriz') DESC, m.cnpj
+            LIMIT %(max)s
+        ) c ON true
+        ORDER BY e.ordem, (c.casou_por = 'nome_fantasia'), (c.matriz_filial = 'Matriz') DESC, c.cnpj
+    """
+
+
 @app.post("/nomes")
 def por_nomes(consulta: ConsultaNomes):
     parametros = {"nomes": consulta.nomes, "max": consulta.max_candidatos}
@@ -700,26 +744,10 @@ def por_nomes(consulta: ConsultaNomes):
     if consulta.excluir_pessoa_fisica:
         extra += " AND " + FILTRO_PESSOA_FISICA
         parametros["naturezas_pf"] = list(NATUREZAS_PESSOA_FISICA)
-    campos = ", ".join(f"c.{campo}" for campo in CAMPOS_NOME)
-    sql = f"""
-        WITH entrada AS (
-            SELECT t.nome, t.ordem, nome_chave(t.nome) AS chave
-            FROM unnest(%(nomes)s::text[]) WITH ORDINALITY AS t(nome, ordem)
-        )
-        SELECT e.ordem, e.nome, e.chave, c.total, {campos}
-        FROM entrada e
-        LEFT JOIN LATERAL (
-            SELECT {", ".join(CAMPOS_NOME)}, count(*) OVER () AS total
-            FROM empresa
-            WHERE situacao_cadastral = 'Ativa' AND nome_chave(razao_social) = e.chave{extra}
-            ORDER BY (matriz_filial = 'Matriz') DESC, cnpj
-            LIMIT %(max)s
-        ) c ON true
-        ORDER BY e.ordem, (c.matriz_filial = 'Matriz') DESC, c.cnpj
-    """
     with pool.connection() as conn:
-        linhas = conn.execute(sql, parametros).fetchall()
-    return {"nomes": agrupar_candidatos(linhas)}
+        por_fantasia = conn.execute(CHAVE_FANTASIA_PRONTA, (INDICE_CHAVE_FANTASIA,)).fetchone()["pronto"]
+        linhas = conn.execute(sql_nomes(extra, por_fantasia), parametros).fetchall()
+    return {"casa_por_fantasia": por_fantasia, "nomes": agrupar_candidatos(linhas)}
 
 
 @app.get("/{cnpj}")

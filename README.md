@@ -81,7 +81,7 @@ O histórico de cargas fica na tabela `carga` e em `GET /carga`.
 | `GET /municipios` | municípios de uma UF com empresas na base |
 | `POST /cnpjs` | consulta em lote, até 1000 CNPJs |
 | `GET /nome` | empresas ativas por nome, por trecho, início ou casamento exato |
-| `POST /nomes` | casamento exato em lote, até 1000 nomes, com os candidatos de cada um |
+| `POST /nomes` | casamento exato em lote, por razão social ou nome fantasia, até 1000 nomes, com os candidatos de cada um |
 
 Sem token e sem limite de requisição, como combinado. A API é de leitura: nenhuma rota escreve no
 banco.
@@ -256,10 +256,36 @@ curl -X POST http://localhost:8006/nomes \
 | `excluir_pessoa_fisica` | ligado por padrão, mesmo critério de `GET /nome` |
 | `max_candidatos` | quantos candidatos devolver por nome, padrão 20, até 100 |
 
-Para cada nome, na ordem enviada, devolve `nome`, a `chave` de casamento calculada pelo banco,
-`total` de candidatos ativos com essa chave e `candidatos`, matrizes primeiro, no mesmo formato
-enxuto de `GET /nome`. `total` maior que `max_candidatos` indica que a lista foi cortada; `total`
-zero, que nenhuma empresa ativa casou.
+Cada nome casa pela chave com a razão social **ou** com o nome fantasia. Para cada nome, na ordem
+enviada, devolve `nome`, a `chave` de casamento calculada pelo banco, `total` de candidatos ativos
+distintos com essa chave e `candidatos` no mesmo formato enxuto de `GET /nome`, mais `casou_por`:
+`razao_social`, `nome_fantasia` ou `ambos`. Quem casou pela razão social vem antes de quem casou só
+pelo fantasia; dentro de cada grupo, matrizes primeiro. `total` maior que `max_candidatos` indica que
+a lista foi cortada; `total` zero, que nenhuma empresa ativa casou.
+
+```json
+{
+  "casa_por_fantasia": true,
+  "nomes": [
+    {
+      "nome": "M.A. Engenharia Ltda",
+      "chave": "MA ENGENHARIA LTDA",
+      "total": 2,
+      "candidatos": [
+        {"cnpj": "12345678000190", "razao_social": "MA ENGENHARIA LTDA", "nome_fantasia": "", "...": "...",
+         "matriz": true, "casou_por": "razao_social"},
+        {"cnpj": "98765432000110", "razao_social": "SILVA E SOUZA PROJETOS LTDA",
+         "nome_fantasia": "M.A. ENGENHARIA LTDA", "...": "...", "matriz": true, "casou_por": "nome_fantasia"}
+      ]
+    }
+  ]
+}
+```
+
+Razão social e fantasia são duas consultas, cada uma no seu índice de chave, unidas e sem CNPJ
+repetido. Enquanto `empresa_fantasia_chave_idx` não existir (ou estiver sendo criado), o casamento
+pelo fantasia exigiria varrer as ativas a cada nome; nesse caso a rota casa só pela razão social, como
+antes, e responde `casa_por_fantasia: false`.
 
 ## Modelo de dados
 

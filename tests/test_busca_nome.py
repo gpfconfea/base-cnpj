@@ -6,6 +6,7 @@ from psycopg.errors import QueryCanceled
 
 from app import api
 from app.api import (
+    FILTRO_PESSOA_FISICA,
     NATUREZAS_PESSOA_FISICA,
     TEMPO_LIMITE_NACIONAL,
     busca_nacional,
@@ -114,10 +115,12 @@ def test_resposta_enxuta_sem_contato_nem_socios():
 
 def test_candidatos_agrupados_na_ordem_dos_nomes_enviados():
     linhas = [
-        {**LINHA, "ordem": 1, "nome": "m.a. engenharia", "chave": "MA ENGENHARIA", "total": 2},
         {**LINHA, "ordem": 1, "nome": "m.a. engenharia", "chave": "MA ENGENHARIA", "total": 2,
-         "cnpj": "12345678000270", "matriz_filial": "Filial"},
-        {**{k: None for k in LINHA}, "ordem": 2, "nome": "inexistente", "chave": "INEXISTENTE", "total": None},
+         "casou_por": "razao_social"},
+        {**LINHA, "ordem": 1, "nome": "m.a. engenharia", "chave": "MA ENGENHARIA", "total": 2,
+         "cnpj": "12345678000270", "matriz_filial": "Filial", "casou_por": "nome_fantasia"},
+        {**{k: None for k in LINHA}, "ordem": 2, "nome": "inexistente", "chave": "INEXISTENTE", "total": None,
+         "casou_por": None},
     ]
 
     resultado = agrupar_candidatos(linhas)
@@ -126,6 +129,7 @@ def test_candidatos_agrupados_na_ordem_dos_nomes_enviados():
     assert resultado[0]["chave"] == "MA ENGENHARIA"
     assert resultado[0]["total"] == 2
     assert [c["matriz"] for c in resultado[0]["candidatos"]] == [True, False]
+    assert [c["casou_por"] for c in resultado[0]["candidatos"]] == ["razao_social", "nome_fantasia"]
     assert resultado[1]["total"] == 0
     assert resultado[1]["candidatos"] == []
 
@@ -277,3 +281,102 @@ def test_post_nomes_exige_ao_menos_um_nome():
     resposta = TestClient(app).post("/nomes", json={"nomes": []})
 
     assert resposta.status_code == 422
+
+
+class _ConexaoNomes:
+    def __init__(self, linhas, chave_fantasia_pronta):
+        self.linhas = linhas
+        self.pronta = chave_fantasia_pronta
+        self.comandos = []
+
+    def execute(self, sql, parametros=None):
+        self.comandos.append((sql, parametros))
+        if "pg_index" in sql:
+            return _Resultado([{"pronto": self.pronta}])
+        return _Resultado(self.linhas)
+
+    def consulta_nomes(self):
+        return next(sql for sql, _ in self.comandos if "entrada" in sql)
+
+
+def _pedir_nomes(monkeypatch, conexao, **corpo):
+    monkeypatch.setattr(api, "pool", _Pool(conexao))
+    return TestClient(app).post("/nomes", json={"nomes": ["ma engenharia"], **corpo})
+
+
+def _linha_nome(**extra):
+    return {**LINHA, "ordem": 1, "nome": "ma engenharia", "chave": "MA ENGENHARIA", "total": 1, **extra}
+
+
+RAMO_RAZAO = "nome_chave(razao_social) = e.chave"
+RAMO_FANTASIA = "nome_chave(nome_fantasia) = e.chave"
+
+
+def test_post_nomes_casa_pela_razao_ou_pelo_fantasia_em_consultas_separadas(monkeypatch):
+    conexao = _ConexaoNomes([], chave_fantasia_pronta=True)
+
+    _pedir_nomes(monkeypatch, conexao)
+
+    sql = conexao.consulta_nomes()
+    assert RAMO_RAZAO in sql
+    assert RAMO_FANTASIA in sql
+    assert "UNION" in sql
+    assert f"{RAMO_RAZAO} OR" not in sql and f"OR {RAMO_FANTASIA}" not in sql
+
+
+def test_post_nomes_filtra_pessoa_fisica_nos_dois_ramos(monkeypatch):
+    conexao = _ConexaoNomes([], chave_fantasia_pronta=True)
+
+    _pedir_nomes(monkeypatch, conexao, uf="go")
+
+    sql = conexao.consulta_nomes()
+    assert sql.count(FILTRO_PESSOA_FISICA) == 2
+    assert sql.count("uf = %(uf)s") == 2
+
+
+def test_post_nomes_sem_o_indice_do_fantasia_casa_so_pela_razao(monkeypatch):
+    conexao = _ConexaoNomes([_linha_nome(casou_por="razao_social")], chave_fantasia_pronta=False)
+
+    resposta = _pedir_nomes(monkeypatch, conexao)
+
+    sql = conexao.consulta_nomes()
+    assert RAMO_RAZAO in sql
+    assert RAMO_FANTASIA not in sql
+    assert resposta.status_code == 200
+    assert resposta.json()["casa_por_fantasia"] is False
+
+
+def test_post_nomes_diz_por_onde_cada_candidato_casou(monkeypatch):
+    linhas = [
+        _linha_nome(casou_por="ambos", total=3),
+        _linha_nome(casou_por="razao_social", total=3, cnpj="12345678000270"),
+        _linha_nome(casou_por="nome_fantasia", total=3, cnpj="99999999000191"),
+    ]
+
+    corpo = _pedir_nomes(monkeypatch, _ConexaoNomes(linhas, chave_fantasia_pronta=True)).json()
+
+    assert corpo["casa_por_fantasia"] is True
+    grupo = corpo["nomes"][0]
+    assert grupo["total"] == 3
+    assert [c["casou_por"] for c in grupo["candidatos"]] == ["ambos", "razao_social", "nome_fantasia"]
+    assert set(grupo["candidatos"][0]) == {*api.CAMPOS_NOME, "matriz", "casou_por"}
+
+
+def test_post_nomes_classifica_o_casamento_no_banco(monkeypatch):
+    conexao = _ConexaoNomes([], chave_fantasia_pronta=True)
+
+    _pedir_nomes(monkeypatch, conexao)
+
+    sql = conexao.consulta_nomes()
+    for valor in ("'ambos'", "'razao_social'", "'nome_fantasia'"):
+        assert valor in sql
+
+
+def test_post_nomes_mantem_pessoa_fisica_fora_por_padrao(monkeypatch):
+    conexao = _ConexaoNomes([], chave_fantasia_pronta=False)
+
+    _pedir_nomes(monkeypatch, conexao)
+
+    _, parametros = next((sql, p) for sql, p in conexao.comandos if "entrada" in sql)
+    assert parametros["naturezas_pf"] == list(NATUREZAS_PESSOA_FISICA)
+    assert parametros["max"] == 20
