@@ -28,6 +28,45 @@ curl http://localhost:8006/health
 `/health` responde `sem_dados` até a primeira carga terminar. Documentação interativa em
 `http://localhost:8006/docs`.
 
+## Deploy no servidor
+
+Com o código novo já na pasta (`C:\base-cnpj`), rode no PowerShell, inclusive por SSH:
+
+```powershell
+cd C:\base-cnpj
+.\scripts\deploy.ps1            # constrói, troca a API, confere /health e volta se falhar
+.\scripts\deploy.ps1 -Simular   # só mostra os passos, sem mudar nada
+.\scripts\deploy.ps1 -Rollback  # volta para a imagem anterior
+```
+
+O script não busca código no GitHub: ele publica o que está na pasta. Os passos:
+
+1. Mostra a versão no ar e a da pasta (commits entre elas, se houver git) e avisa se há arquivo
+   versionado alterado. O aviso não bloqueia.
+2. Guarda a imagem atual como `base-cnpj-api:anterior`.
+3. Constrói a imagem nova com a API no ar (`docker compose build api`).
+4. Recria só o contêiner da API (`docker compose up -d --no-deps --no-build --force-recreate api`).
+   A API fica fora do ar por uns 5 a 15 segundos: o tempo de parar o contêiner antigo e o
+   uvicorn subir o novo. Troca sem queda exigiria um proxy na frente e tirar a porta fixa da API,
+   o que não compensa aqui.
+5. Espera `GET /health` responder 200 (padrão 90 s, `-TempoLimiteSaude` muda). Se não responder,
+   mostra o log, volta para `base-cnpj-api:anterior` e termina com erro. O código da pasta não é
+   mexido no rollback.
+
+O banco (`db`, volume `pgdata`) nunca é tocado, e nenhuma carga é disparada. Uma carga em andamento
+continua com a imagem em que começou.
+
+### Erro de credenciais por SSH
+
+`docker compose build` por SSH parava em `error getting credentials ... Uma sessão de início de
+sessão especificada não existe` ao baixar `python:3.12-slim`. O Docker Desktop guarda senhas no
+cofre do Windows (`credsStore` em `%USERPROFILE%\.docker\config.json`), e esse cofre só existe na
+sessão aberta na tela, não na sessão do SSH. Quando roda por SSH (`SSH_CONNECTION` definido) e
+`DOCKER_CONFIG` não está definido, o script aponta o Docker, só naquela execução, para um
+`config.json` próprio em `%TEMP%` com uma entrada de login fictícia. A entrada é necessária: com o
+arquivo vazio o Docker volta a escolher o cofre sozinho. A imagem base é pública e baixa sem login.
+Fora do SSH, `-SemCofreDeCredenciais` faz o mesmo. Nada no usuário é alterado.
+
 ## Carregar e atualizar a base
 
 ```bash
