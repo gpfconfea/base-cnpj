@@ -487,6 +487,15 @@ docker compose --profile manual run --rm -v ./app:/app/app -v ./scripts:/app/scr
 tentativa cair no meio, o índice fica inválido e o script para, pedindo `DROP INDEX CONCURRENTLY`
 antes de tentar de novo.
 
+Base que já tem os três primeiros e só precisa da chave do nome fantasia:
+`scripts/temp_criar_indice_fantasia.py` cria apenas `empresa_fantasia_chave_idx`, com os mesmos
+cuidados (concorrente, idempotente, estimativa, espaço livre, parada em índice inválido) e roda
+`ANALYZE empresa` no fim. Os mesmos argumentos valem:
+
+```bash
+python scripts/temp_criar_indice_fantasia.py --host 192.168.1.18 --porta 5436
+```
+
 Para conferir o que existe de fato no banco:
 
 ```sql

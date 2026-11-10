@@ -42,3 +42,21 @@ def test_versao_concorrente_e_idempotente():
     assert [nome for nome, _ in indices] == [nome for nome, _ in INDICES_BUSCA_NOME]
     for nome, comando in indices:
         assert comando.startswith(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {nome} ON empresa ")
+
+
+def test_script_temporario_cria_so_a_chave_do_fantasia_de_forma_idempotente():
+    import importlib.util
+    import pathlib
+
+    caminho = pathlib.Path(__file__).resolve().parent.parent / "scripts" / "temp_criar_indice_fantasia.py"
+    especificacao = importlib.util.spec_from_file_location("temp_criar_indice_fantasia", caminho)
+    script = importlib.util.module_from_spec(especificacao)
+    especificacao.loader.exec_module(script)
+
+    preparo, comando = script.comando_do_indice()
+
+    assert preparo == PREPARO_BUSCA_NOME
+    assert comando == (
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS empresa_fantasia_chave_idx ON empresa "
+        "(nome_chave(nome_fantasia)) WHERE situacao_cadastral = 'Ativa'"
+    )
