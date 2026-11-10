@@ -10,16 +10,24 @@ def test_preparo_vem_antes_dos_indices_de_nome_na_carga():
 
 
 def test_indices_de_nome_sao_parciais_nas_ativas():
-    assert len(INDICES_BUSCA_NOME) == 3
+    assert len(INDICES_BUSCA_NOME) == 4
     for _, definicao in INDICES_BUSCA_NOME:
         assert definicao.endswith("WHERE situacao_cadastral = 'Ativa'")
 
 
-def test_trigramas_na_razao_e_no_fantasia_e_chave_na_razao():
-    definicoes = " ".join(definicao for _, definicao in INDICES_BUSCA_NOME)
-    assert "gin (razao_social gin_trgm_ops)" in definicoes
-    assert "gin (nome_fantasia gin_trgm_ops)" in definicoes
-    assert "(nome_chave(razao_social))" in definicoes
+def test_trigramas_e_chave_na_razao_e_no_fantasia():
+    definicoes = dict(INDICES_BUSCA_NOME)
+    assert "gin (razao_social gin_trgm_ops)" in definicoes["empresa_razao_trgm_idx"]
+    assert "gin (nome_fantasia gin_trgm_ops)" in definicoes["empresa_fantasia_trgm_idx"]
+    assert definicoes["empresa_razao_chave_idx"].startswith("(nome_chave(razao_social))")
+    assert definicoes["empresa_fantasia_chave_idx"] == "(nome_chave(nome_fantasia)) WHERE situacao_cadastral = 'Ativa'"
+
+
+def test_carga_cria_a_chave_do_fantasia():
+    assert (
+        "CREATE INDEX empresa_fantasia_chave_idx ON empresa "
+        "(nome_chave(nome_fantasia)) WHERE situacao_cadastral = 'Ativa'"
+    ) in INDICES
 
 
 def test_funcao_de_chave_e_imutavel():

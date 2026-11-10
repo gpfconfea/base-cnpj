@@ -101,6 +101,7 @@ INDICES_BUSCA_NOME = (
     ("empresa_razao_trgm_idx", "USING gin (razao_social gin_trgm_ops) WHERE situacao_cadastral = 'Ativa'"),
     ("empresa_fantasia_trgm_idx", "USING gin (nome_fantasia gin_trgm_ops) WHERE situacao_cadastral = 'Ativa'"),
     ("empresa_razao_chave_idx", "(nome_chave(razao_social)) WHERE situacao_cadastral = 'Ativa'"),
+    ("empresa_fantasia_chave_idx", "(nome_chave(nome_fantasia)) WHERE situacao_cadastral = 'Ativa'"),
 )
 
 

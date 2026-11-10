@@ -423,6 +423,7 @@ Chave primária em `(uf, codigo)`.
 | `empresa_razao_trgm_idx` | `empresa` | `GIN (razao_social gin_trgm_ops)`, só ativas | ~2,8 GB (estimado) |
 | `empresa_fantasia_trgm_idx` | `empresa` | `GIN (nome_fantasia gin_trgm_ops)`, só ativas | ~0,5 GB (estimado) |
 | `empresa_razao_chave_idx` | `empresa` | `(nome_chave(razao_social))`, só ativas | ~1,5 GB (estimado) |
+| `empresa_fantasia_chave_idx` | `empresa` | `(nome_chave(nome_fantasia))`, só ativas | ~0,6 GB (estimado) |
 | `dominio_pkey` | `dominio` | `PRIMARY KEY (tipo, codigo)` | KB |
 | `carga_pkey` | `carga` | `PRIMARY KEY (id)` | KB |
 | `carga_concluida_idx` | `carga` | `(concluida_em DESC NULLS LAST)` | KB |
@@ -432,7 +433,7 @@ Tamanhos para as ~72,7 milhões de linhas da carga de setembro de 2026. Os índi
 criados **depois** do `COPY`, nunca antes: manter btree durante a carga trocaria escrita sequencial
 por escrita aleatória e multiplicaria o tempo de ingestão.
 
-Os três últimos atendem `GET /nome` e `POST /nomes`. São parciais em `situacao_cadastral = 'Ativa'`,
+Os quatro últimos atendem `GET /nome` e `POST /nomes`. São parciais em `situacao_cadastral = 'Ativa'`,
 cerca de 29 milhões das 75 milhões de linhas, e a consulta repete essa condição literalmente para o
 planejador poder usá-los. Dependem da extensão `pg_trgm` e da função `nome_chave`, que a carga cria
 antes deles. `nome_chave` tira acento e põe em maiúsculas por conta própria, então o casamento vale
@@ -441,7 +442,7 @@ igual numa tabela carregada antes da normalização da razão social na ingestã
 #### Criar os índices de nome numa base já carregada
 
 Temporário, até a próxima carga, que já os cria: `scripts/temp_criar_indices_nome.py` instala
-`pg_trgm`, cria `nome_chave` e os três índices com `CREATE INDEX CONCURRENTLY IF NOT EXISTS`, sem
+`pg_trgm`, cria `nome_chave` e os quatro índices com `CREATE INDEX CONCURRENTLY IF NOT EXISTS`, sem
 bloquear a API. Pode rodar de novo: o que já existe é pulado. Antes de criar, mostra o tamanho
 estimado e o espaço livre no servidor do banco, e para se o livre não chegar ao dobro do estimado. No
 fim, mostra o tamanho real e o tempo de cada índice.

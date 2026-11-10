@@ -35,11 +35,13 @@ def estimar(conn):
                coalesce(sum(octet_length(razao_social) + 2) FILTER (WHERE situacao_cadastral = 'Ativa'), 0),
                coalesce(sum(octet_length(nome_fantasia) + 2) FILTER (WHERE situacao_cadastral = 'Ativa'), 0),
                coalesce(sum(((octet_length(razao_social) + 1 + 7) / 8) * 8 + 12)
+                   FILTER (WHERE situacao_cadastral = 'Ativa'), 0),
+               coalesce(sum(coalesce(((octet_length(nome_fantasia) + 1 + 7) / 8) * 8, 0) + 12)
                    FILTER (WHERE situacao_cadastral = 'Ativa'), 0)
         FROM empresa TABLESAMPLE SYSTEM ({AMOSTRA_PCT}) REPEATABLE (1)
         """
     ).fetchone()
-    total, ativas, razao, fantasia, chave = amostra
+    total, ativas, razao, fantasia, chave, chave_fantasia = amostra
     escala = linhas_tabela / total if total else 0
     return {
         "linhas": int(linhas_tabela),
@@ -47,6 +49,7 @@ def estimar(conn):
         "empresa_razao_trgm_idx": razao * escala * BYTES_POR_TRIGRAMA,
         "empresa_fantasia_trgm_idx": fantasia * escala * BYTES_POR_TRIGRAMA,
         "empresa_razao_chave_idx": chave * escala / 0.9,
+        "empresa_fantasia_chave_idx": chave_fantasia * escala / 0.9,
     }
 
 
